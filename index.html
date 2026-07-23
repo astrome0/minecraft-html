@@ -11236,6 +11236,8 @@ const Mobile = {
   lastJump: 0,
   dragCtrl: null, dragId: null,
   creativeAcc: 0,
+  slot: null, _slotTimer: null,
+  kbEl: null, kbTarget: null,
 
   // ---- control definitions: default normalized position + look/behaviour ----
   // nx,ny are fractions of the canvas (0..1). rmul scales the base radius.
@@ -11250,12 +11252,13 @@ const Mobile = {
     drop:   { nx: 0.865, ny: 0.10, rmul: 0.95, kind: 'tap', glyph: 'drop' },
     fly:    { nx: 0.775, ny: 0.10, rmul: 0.95, kind: 'toggle', glyph: 'fly', creative: true },
     pause:  { nx: 0.045, ny: 0.09, rmul: 0.85, kind: 'tap', glyph: 'pause' },
+    chat:   { nx: 0.135, ny: 0.09, rmul: 0.85, kind: 'tap', glyph: 'chat' },
   },
   BASE_R: 34,   // base button radius in CSS px (before rmul * layout.size)
 
   order() {
     // draw/hit order (later = on top); pause & utility first, action buttons last
-    return ['move', 'pause', 'inv', 'drop', 'fly', 'sprint', 'sneak', 'use', 'break', 'jump'];
+    return ['move', 'pause', 'chat', 'inv', 'drop', 'fly', 'sprint', 'sneak', 'use', 'break', 'jump'];
   },
 
   defaultLayout() {
@@ -11349,6 +11352,12 @@ const Mobile = {
     else if (role === 'look') this.lookMove(x, y);
     else if (role === 'editor') this.editorMove(id, x, y);
     else if (role === 'menu') this.menuMove(x, y);
+    else if (role === 'slotmenu') this.slotMenuMove(x, y);
+  },
+  slotMenuMove(x, y) {
+    if (this.slot && Math.hypot(x - this.slot.x, y - this.slot.y) > 10) {
+      this.slot.moved = true; clearTimeout(this._slotTimer);
+    }
   },
   onUp(e) {
     if (!this.enabled) return;
@@ -11360,6 +11369,7 @@ const Mobile = {
     else if (role === 'look') { this.lookId = null; }
     else if (role === 'editor') { this.dragCtrl = null; this.dragId = null; this.save(); }
     else if (role === 'menu') { UI.mouseDown = false; UI.onMouseUp(); }
+    else if (role === 'slotmenu') { this.slotMenuEnd(); }
     else if (role.startsWith('btn:')) this.releaseControl(role.slice(4));
   },
   releaseAll() {
@@ -11450,6 +11460,10 @@ const Mobile = {
       case 'inv': if (UI.screen === 'none') { UI.openInventory(); this.game.achieve && this.game.achieve('inventory'); } this.active.inv = false; break;
       case 'drop': p.dropSelected(false); this.active.drop = false; break;
       case 'pause': UI.screen = 'pause'; this.active.pause = false; this.releaseAll(); break;
+      case 'chat':
+        this.active.chat = false;
+        if (typeof Chat !== 'undefined' && UI.screen === 'none') { Chat.openChat(''); this.openKeyboard('chat'); }
+        break;
     }
     if (typeof Sfx !== 'undefined' && (this.DEFS[idc].kind === 'tap' || idc === 'sprint')) Sfx.play('click');
   },
@@ -11478,14 +11492,43 @@ const Mobile = {
   },
 
   // ---- menu emulation (reuse existing mouse-driven UI) ----
+  isSlotScreen(s) { return s === 'inventory' || s === 'crafting' || s === 'furnace' || s === 'chest'; },
   menuStart(id, x, y) {
+    // a tap anywhere while chat is up dismisses the keyboard/chat
+    if (typeof Chat !== 'undefined' && Chat.open) { this.closeKeyboard(); return; }
     // close (X) button drawn by Mobile when a menu is open
     if (UI.screen !== 'none' && this.closeHit(x, y)) { this.closeMenu(); return; }
-    UI.mx = x / UI.scale; UI.my = y / UI.scale; UI.mouseDown = true;
-    this.touchRole[id] = 'menu';
+    UI.mx = x / UI.scale; UI.my = y / UI.scale;
     this.creativeAcc = 0;
+    // inventory/crafting/furnace/chest: tap = left-click (on release), long-press = right-click (split)
+    if (this.isSlotScreen(UI.screen)) {
+      this.slot = { id, x, y, moved: false, longFired: false };
+      this.touchRole[id] = 'slotmenu';
+      clearTimeout(this._slotTimer);
+      this._slotTimer = setTimeout(() => {
+        if (this.touchRole[id] === 'slotmenu' && this.slot && !this.slot.moved) {
+          this.slot.longFired = true;
+          UI.mx = x / UI.scale; UI.my = y / UI.scale;
+          UI.onMouseDown(2, false); // right-click → split stack
+          if (typeof Sfx !== 'undefined') Sfx.play('click');
+        }
+      }, 380);
+      return;
+    }
+    UI.mouseDown = true;
+    this.touchRole[id] = 'menu';
     if (this.game.state === 'win') { this.game.skipCredits(); return; }
     UI.onMouseDown(0, false);
+    // world-create text fields → pop the iOS keyboard for the tapped field
+    if (this.game.state === 'create') {
+      for (const b of UI.buttons) {
+        if (UI.mx >= b.x && UI.mx < b.x + b.w && UI.my >= b.y && UI.my < b.y + b.h) {
+          if (b.id === 'focus_name') this.openKeyboard('name');
+          else if (b.id === 'focus_seed') this.openKeyboard('seed');
+          break;
+        }
+      }
+    }
   },
   menuMove(x, y) {
     const oldY = UI.my;
@@ -11500,6 +11543,15 @@ const Mobile = {
         this.creativeAcc -= dir * -12;
       }
     }
+  },
+  slotMenuEnd() {
+    clearTimeout(this._slotTimer);
+    if (this.slot && !this.slot.longFired) {
+      UI.mx = this.slot.x / UI.scale; UI.my = this.slot.y / UI.scale;
+      UI.onMouseDown(0, false); // tap = left-click
+    }
+    UI.onMouseUp();
+    this.slot = null;
   },
   closeHit(x, y) {
     const r = this.closeBtn();
@@ -11516,6 +11568,57 @@ const Mobile = {
     if (s === 'controls') return this.game.onButton('controls_done');
     if (s === 'touchedit') return this.game.onButton('touch_done');
     UI.closeScreen();
+  },
+
+  // ---- iOS soft keyboard (hidden <input> so mobile browsers show the keyboard) ----
+  ensureKbEl() {
+    if (this.kbEl) return this.kbEl;
+    const el = document.createElement('input');
+    el.type = 'text';
+    el.autocomplete = 'off'; el.autocapitalize = 'off'; el.autocorrect = 'off'; el.spellcheck = false;
+    // opacity 0 but focusable; 16px font stops iOS zoom; kept near top-left, out of the way
+    el.style.cssText = 'position:fixed;top:2px;left:2px;width:120px;height:24px;opacity:0.01;' +
+      'border:0;padding:0;margin:0;background:transparent;color:transparent;caret-color:transparent;' +
+      'font-size:16px;z-index:5;pointer-events:none;';
+    el.addEventListener('input', () => this.onKbInput());
+    el.addEventListener('keydown', (e) => this.onKbKeydown(e));
+    el.addEventListener('blur', () => this.onKbBlur());
+    document.body.appendChild(el);
+    this.kbEl = el;
+    return el;
+  },
+  openKeyboard(target) {
+    const el = this.ensureKbEl();
+    this.kbTarget = target;
+    if (target === 'chat') el.value = Chat.input || '';
+    else if (target === 'name') el.value = UI.nameInput || '';
+    else if (target === 'seed') el.value = UI.seedInput || '';
+    el.maxLength = target === 'chat' ? 100 : 24;
+    el.setAttribute('enterkeyhint', target === 'chat' ? 'send' : 'done');
+    // focus must run inside the same user gesture for iOS to raise the keyboard
+    try { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } catch (e) {}
+  },
+  onKbInput() {
+    if (!this.kbTarget) return;
+    const v = this.kbEl.value;
+    if (this.kbTarget === 'chat') { Chat.input = v.slice(0, 100); Chat.updateSuggestions(); }
+    else if (this.kbTarget === 'name') { UI.nameInput = v.slice(0, 24); }
+    else if (this.kbTarget === 'seed') { UI.seedInput = v.slice(0, 24); }
+  },
+  onKbKeydown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (this.kbTarget === 'chat') { Chat.submit(); this.closeKeyboard(); }
+      else { const t = this.kbTarget; this.closeKeyboard(); this.game.onButton('create_go'); }
+    }
+  },
+  onKbBlur() {
+    if (this.kbTarget === 'chat' && typeof Chat !== 'undefined' && Chat.open) Chat.close();
+    this.kbTarget = null;
+  },
+  closeKeyboard() {
+    this.kbTarget = null;
+    if (this.kbEl) { try { this.kbEl.blur(); } catch (e) {} }
   },
 
   // ---- per-frame safety ----
@@ -11583,6 +11686,22 @@ const Mobile = {
         ctx.lineTo(cx - a * 0.55 + k * a * 0.35, cy + a * 0.55);
         ctx.stroke();
       }
+    } else if (g === 'chat') {
+      // speech bubble
+      ctx.lineWidth = Math.max(2, r * 0.1);
+      const w = a * 1.4, h = a * 1.0, x0 = cx - w / 2, y0 = cy - h / 2 - a * 0.15, rad = a * 0.3;
+      ctx.beginPath();
+      ctx.moveTo(x0 + rad, y0);
+      ctx.arcTo(x0 + w, y0, x0 + w, y0 + h, rad);
+      ctx.arcTo(x0 + w, y0 + h, x0, y0 + h, rad);
+      ctx.arcTo(x0, y0 + h, x0, y0, rad);
+      ctx.arcTo(x0, y0, x0 + w, y0, rad);
+      ctx.closePath(); ctx.stroke();
+      ctx.beginPath(); // tail
+      ctx.moveTo(cx - a * 0.15, y0 + h);
+      ctx.lineTo(cx - a * 0.35, y0 + h + a * 0.45);
+      ctx.lineTo(cx + a * 0.15, y0 + h);
+      ctx.fill();
     } else {
       // text glyph via bitmap font
       const map = { mine: 'MINE', use: 'USE', bag: 'BAG', drop: 'DROP', fly: 'FLY', pause: 'II' };
@@ -11821,6 +11940,8 @@ const Game = {
     if (document.exitPointerLock) document.exitPointerLock();
   },
   onKey(e, down) {
+    // when the mobile on-screen keyboard is active, its hidden <input> owns text entry
+    if (Mobile.enabled && Mobile.kbTarget) return;
     const code = e.code;
     if (down && code === 'F11') { e.preventDefault(); this.toggleFullscreen(); return; }
     if (down && code === 'F3') { e.preventDefault(); this.showDebug = !this.showDebug; return; }
