@@ -6260,8 +6260,11 @@ const Weather = {
   update(dt, game) {
     const world = game.world;
     const overworld = world && world.dim === 'overworld';
-    // roll the weather over when the timer runs out (skip in other dims)
-    if (overworld) {
+    // roll the weather over when the timer runs out (skip in other dims).
+    // In multiplayer the HOST owns the weather — the guest only applies what it's
+    // sent (Game.onRemoteEnv), so it must never roll its own state over.
+    const guest = game.isGuest && typeof Net !== 'undefined' && Net.connected;
+    if (overworld && !guest) {
       this.timer -= dt;
       if (this.timer <= 0) {
         // clear ⇄ rain, with the odd rain → thunder
@@ -6711,17 +6714,19 @@ function humanoidModel(tex, armsOut) {
     ],
     pose(e, out) {
       const sw = Math.sin(e.walkT) * clamp(e.walkAmp, 0, 1) * 0.8;
-      // sneaking (remote player): drop the upper body and lean the torso forward while
-      // the legs stay planted — reads as a proper vanilla-style crouch. Normal mobs
-      // never set e.sneak, so dip/tilt stay 0 and they're unaffected.
+      // Crouch (remote player only — normal mobs never set e.sneak, so this is a no-op
+      // for them): the whole upper body (head + torso + arms) drops and shifts FORWARD;
+      // the legs stay planted. Live-tweakable via MC.game.crouchPose.* for tuning —
+      // dip = how far down, fwd = how far forward (+z is forward), tilt = torso rotation.
       const sn = e.sneak ? 1 : 0;
-      const dip = sn * 0.2, tilt = sn * 0.5, fwd = -sn * 0.1;
+      const CP = (typeof Game !== 'undefined' && Game.crouchPose) ? Game.crouchPose : { dip: 0.2, tilt: 0.5, fwd: 0.25 };
+      const dip = sn * CP.dip, tilt = sn * CP.tilt, fwd = sn * CP.fwd;
       out[0] = bonePose(e, [0, 1.5 - dip, fwd], { x: e.headPitch || 0, y: headYawLocal(e) });
-      out[1] = bonePose(e, [0, 1.5 - dip, 0], { x: tilt });
+      out[1] = bonePose(e, [0, 1.5 - dip, fwd], { x: tilt });
       if (armsOut) {
         const wave = Math.sin(e.age * 2) * 0.06;
-        out[2] = bonePose(e, [-6 / 16, 1.375 - dip, 0], { x: -Math.PI / 2 + wave + sw * 0.15 });
-        out[3] = bonePose(e, [6 / 16, 1.375 - dip, 0], { x: -Math.PI / 2 - wave - sw * 0.15 });
+        out[2] = bonePose(e, [-6 / 16, 1.375 - dip, fwd], { x: -Math.PI / 2 + wave + sw * 0.15 });
+        out[3] = bonePose(e, [6 / 16, 1.375 - dip, fwd], { x: -Math.PI / 2 - wave - sw * 0.15 });
       } else {
         // right arm can play a punch/mine swing when e.swing is set (0=just swung → 1=idle).
         // used for the remote multiplayer player; normal mobs leave e.swing undefined.
@@ -6731,8 +6736,8 @@ function humanoidModel(tex, armsOut) {
           armR = -arc * 1.35 + sw * 0.25; // swing the arm up & forward toward the look dir
           armZ = -arc * 0.15;
         }
-        out[2] = bonePose(e, [-6 / 16, 1.375 - dip, 0], { x: armR + tilt, z: armZ });
-        out[3] = bonePose(e, [6 / 16, 1.375 - dip, 0], { x: -sw + tilt });
+        out[2] = bonePose(e, [-6 / 16, 1.375 - dip, fwd], { x: armR + tilt, z: armZ });
+        out[3] = bonePose(e, [6 / 16, 1.375 - dip, fwd], { x: -sw + tilt });
       }
       out[4] = bonePose(e, [-2 / 16, 0.75, 0], { x: -sw });
       out[5] = bonePose(e, [2 / 16, 0.75, 0], { x: sw });
@@ -10427,6 +10432,8 @@ const UI = {
     this.sliders = [];
     if (this.dragSlider && this.mouseDown) this.updateSlider();
     const W = this.W(), H = this.H();
+    // the file-picker input only overlays the Multiplayer screen's Upload Skin button
+    if (game.state !== 'mp' && game.hideSkinInput) game.hideSkinInput();
     if (game.state === 'title') return this.drawTitle(game);
     if (game.state === 'worlds') return this.drawWorlds(game);
     if (game.state === 'create') return this.drawCreate(game);
@@ -10537,6 +10544,11 @@ const UI = {
       } else if (game.isGuest) {
         this.text('MP: connected', 2, 2, '#55ff55');
       }
+    }
+    // sleeping: both players must be in a bed before the night is skipped
+    if (game.sleeping) {
+      const n = game.remoteSleeping ? 2 : 1;
+      this.textC('Sleeping (' + n + '/2) — move to get up', cx, H * 0.42, '#ffff99');
     }
     // crosshair (inverted). Both arms go in ONE fill() so the overlapping centre
     // pixel is differenced exactly once (no stray dark dot). Both rects share the same
@@ -10982,8 +10994,10 @@ const UI = {
     const ncur = nfoc && ((performance.now() / 400) | 0) % 2 === 0 ? '_' : '';
     this.textScaled((Game.mpName || '') + ncur, bx + 4, ny + 4, '#ffffff', 1.5);
     this.buttons.push({ id: 'mp_focus_name', x: bx, y: ny, w: 200, h: 20 });
-    // custom-skin upload
+    // custom-skin upload — the real <input type=file> is parked on top of this button
+    // so phone taps hit it directly (mobile blocks synthetic .click() pickers)
     this.button('mp_upload_skin', bx, H * 0.24 + 34, 200, Game.hasSkin ? 'Change Skin (PNG)' : 'Upload Skin (PNG)');
+    Game.placeSkinInput(bx, H * 0.24 + 34, 200, 20);
     if (Game.hasSkin) this.text('skin loaded', bx + 204, H * 0.24 + 40, '#55ff55');
     // join code field
     this.text('Join Code (6 digits)', bx, H * 0.40, '#a0a0a0');
@@ -12210,11 +12224,15 @@ const Game = {
   mpRole: null, isGuest: false, remote: null, mpPosTimer: 0, mpCapturing: null,
   mpDropSeq: 0, mpDropTimer: 0,
   mpEntSeq: 0, mpEntTimer: 0, _remoteProxy: null, mpName: '', remoteName: '',
-  hasSkin: false, remoteHasSkin: false, mySkinData: null, _skinInput: null,
+  hasSkin: false, remoteHasSkin: false, mySkinData: null, _skinInput: null, _skinInputRect: null,
+  mpEnvTimer: 0, sleeping: false, remoteSleeping: false,
   loadQueue: null,
   pendingSave: null,
   // first-person bare-arm pose (live-tweakable via MC.game.armPose.* for tuning)
   armPose: { posX: 0.89, posY: -0.68, posZ: -0.78, rotZ: 1.35, rotY: -0.57, rotX: 1.39, scale: 0.82 },
+  // remote player's sneak pose (values dialled in by Patrik with the F6 tuner)
+  // dip = upper body drop, fwd = upper body shift forward (+z), tilt = torso rotation
+  crouchPose: { dip: 0.26, tilt: 0.5, fwd: 0.25 },
   armThick: 5, // arm box width/depth in 1/16 units (vanilla default is 4); height stays 12
 
   // rebuilds the steve_arm box geometry at the current armThick and clears the cached
@@ -12345,7 +12363,7 @@ const Game = {
     this._netInit = true;
     // a guest joined our hosted world → send them the whole world so they generate it
     Net.on('guest_joined', () => { if (this.mpRole === 'host' && this.player) { this.mpSendWorld(); this.mpSendHello(); this.mpSendSkin(); UI.msg('A player joined!'); } });
-    Net.on('guest_left', () => { this.remote = null; this.remoteName = ''; this.remoteHasSkin = false; if (this.mpRole === 'host') UI.msg('The other player left'); });
+    Net.on('guest_left', () => { this.remote = null; this.remoteName = ''; this.remoteHasSkin = false; this.remoteSleeping = false; if (this.mpRole === 'host') UI.msg('The other player left'); });
     Net.on('world', (m) => this.mpJoinWorld(m));
     Net.on('pos', (m) => this.onRemotePos(m));
     Net.on('blocks', (m) => this.onRemoteBlocks(m));
@@ -12359,8 +12377,12 @@ const Game = {
     Net.on('phit', (m) => this.onRemotePhit(m));        // either side: the other player hit me
     Net.on('hello', (m) => { this.remoteName = (m.name || '').slice(0, 16) || 'Player'; }); // display name exchange
     Net.on('skin', (m) => { if (m.data) this.loadSkinDataURL(m.data, false); }); // other player's custom skin
+    Net.on('env', (m) => this.onRemoteEnv(m));   // guest: host's authoritative time + weather
+    Net.on('sleep', (m) => this.onRemoteSleep(m)); // the other player got into / out of a bed
+    Net.on('wake', (m) => this.onRemoteWake(m));   // host decided everyone slept → morning
     Net.on('closed', () => {
       this.remote = null; this.remoteName = ''; this.remoteHasSkin = false;
+      this.sleeping = false; this.remoteSleeping = false;
       if (this.isGuest) { UI.msg('Disconnected from host', '#ff5555'); }
       else if (this.mpRole === 'host') UI.msg('Multiplayer closed: ' + (Net.errorMsg || ''), '#ff5555');
       this.mpRole = null; this.isGuest = false;
@@ -12423,24 +12445,105 @@ const Game = {
     img.onerror = () => { if (isSelf) UI.msg('Could not load that image', '#ff5555'); };
     img.src = dataURL;
   },
-  // open the OS file picker (must be inside a click gesture) and apply the chosen PNG
-  pickSkin() {
-    if (!this._skinInput) {
-      const inp = document.createElement('input');
-      inp.type = 'file'; inp.accept = 'image/png,image/*'; inp.style.display = 'none';
-      inp.addEventListener('change', () => {
-        const f = inp.files && inp.files[0]; if (!f) return;
-        const rd = new FileReader();
-        rd.onload = () => this.loadSkinDataURL(rd.result, true);
-        rd.readAsDataURL(f);
-        inp.value = '';
-      });
-      document.body.appendChild(inp);
-      this._skinInput = inp;
-    }
-    this._skinInput.click();
+  // open the OS file picker (must be inside a click gesture) and apply the chosen PNG.
+  // iOS/Android will NOT open a picker for a `display:none` input, so the element is
+  // kept in the layout and hidden with opacity instead — same trick the mobile
+  // keyboard <input> uses. `accept="image/*"` makes iOS offer Photo Library / Take
+  // Photo / Browse (Files), which is where a downloaded skin PNG actually lives.
+  ensureSkinInput() {
+    if (this._skinInput) return this._skinInput;
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = 'image/*';
+    inp.style.cssText = 'position:fixed;left:-9999px;top:0;width:10px;height:10px;opacity:0.01;' +
+      'border:0;padding:0;margin:0;background:transparent;z-index:6;pointer-events:none;';
+    inp.addEventListener('change', () => {
+      const f = inp.files && inp.files[0];
+      inp.value = '';
+      if (!f) return;
+      const rd = new FileReader();
+      rd.onload = () => this.loadSkinDataURL(rd.result, true);
+      rd.onerror = () => UI.msg('Could not read that file', '#ff5555');
+      rd.readAsDataURL(f);
+    });
+    document.body.appendChild(inp);
+    this._skinInput = inp;
+    return inp;
   },
+  // Park the real <input> exactly over the on-screen "Upload Skin" button so a tap
+  // lands on it natively. Mobile browsers (iOS especially) refuse to open a file
+  // picker from a synthetic .click() on a hidden input, so the element itself has to
+  // be the touch target. Coords are UI-virtual; canvas px == CSS px here, and
+  // virtual * UI.scale == CSS px (see UI.resize).
+  placeSkinInput(vx, vy, vw, vh) {
+    const inp = this.ensureSkinInput(), s = UI.scale;
+    const key = [vx, vy, vw, vh, s].join(',');
+    if (this._skinInputRect === key) return; // drawn every frame — only touch styles on change
+    this._skinInputRect = key;
+    inp.style.left = Math.round(vx * s) + 'px';
+    inp.style.top = Math.round(vy * s) + 'px';
+    inp.style.width = Math.round(vw * s) + 'px';
+    inp.style.height = Math.round(vh * s) + 'px';
+    inp.style.pointerEvents = 'auto';
+  },
+  hideSkinInput() {
+    const inp = this._skinInput;
+    if (!inp || this._skinInputRect === null) return;
+    this._skinInputRect = null;
+    inp.style.left = '-9999px';
+    inp.style.pointerEvents = 'none';
+  },
+  // desktop / fallback path: open the picker from the button handler's click gesture
+  pickSkin() { this.ensureSkinInput().click(); },
   mpSendSkin() { if (Net.connected && this.mySkinData) Net.send('skin', { data: this.mySkinData }); },
+  // ---- world time + weather sync (host-authoritative) ----
+  // The host owns the clock and the weather; the guest keeps ticking its own time
+  // smoothly between updates and just snaps to the host's value when one arrives.
+  mpBroadcastEnv(dt) {
+    if (this.mpRole !== 'host' || !Net.connected) return;
+    this.mpEnvTimer += dt;
+    if (this.mpEnvTimer < 1.5) return;
+    this.mpEnvTimer = 0;
+    Net.send('env', { time: Math.round(this.time), w: Weather.state, wt: Math.round(Weather.timer) });
+  },
+  onRemoteEnv(m) {
+    if (this.mpRole === 'host') return;
+    if (m.time != null) this.time = m.time;
+    if (m.w && m.w !== Weather.state) Weather.set(m.w, m.wt);
+    else if (m.wt != null) Weather.timer = m.wt;
+  },
+  // ---- multiplayer sleeping: everyone has to be in a bed before the night is skipped ----
+  onRemoteSleep(m) {
+    this.remoteSleeping = !!m.v;
+    if (this.remoteSleeping) UI.msg((this.remoteName || 'The other player') + ' is sleeping (' + (this.sleeping ? 2 : 1) + '/2)');
+    this.mpCheckSleep();
+  },
+  // host only: once both players are in bed, skip to morning and tell the guest
+  mpCheckSleep() {
+    if (this.mpRole !== 'host' || !this.sleeping || !this.remoteSleeping) return;
+    this.time = Math.ceil(this.time / 24000) * 24000 + 100;
+    this.sleeping = false; this.remoteSleeping = false;
+    Weather.set('clear'); // vanilla: a night's sleep clears the storm
+    Net.send('wake', { time: Math.round(this.time) });
+    this.mpEnvTimer = 99; // force an env push on the next frame
+    UI.msg('You slept through the night');
+  },
+  onRemoteWake(m) {
+    this.sleeping = false; this.remoteSleeping = false;
+    if (m.time != null) this.time = m.time;
+    UI.msg('You slept through the night');
+  },
+  // any movement gets you out of bed again
+  mpUpdateSleep() {
+    if (!this.sleeping) return;
+    const K = this.player && this.player.keys;
+    if (!K) return;
+    if (K.fwd || K.back || K.left || K.right || K.jump) {
+      this.sleeping = false;
+      if (Net.connected) Net.send('sleep', { v: 0 });
+      UI.msg('You got up');
+    }
+  },
   mpJoinWorld(m) {
     // guest side: build the host's world from the payload, spawn beside the host
     this.isGuest = true; this.mpRole = 'guest';
@@ -13164,9 +13267,17 @@ const Game = {
       }
     }
     this.player.bedSpawn = { x: x + 0.5, y: y + 1, z: z + 0.5 };
+    Sfx.play('click');
+    // multiplayer: BOTH players have to be in a bed before the night is skipped
+    if (Net.connected) {
+      this.sleeping = true;
+      Net.send('sleep', { v: 1 });
+      this.mpCheckSleep();
+      if (this.sleeping) UI.msg('Sleeping (1/2) — waiting for ' + (this.remoteName || 'the other player'));
+      return;
+    }
     this.time = Math.ceil(this.time / 24000) * 24000 + 100;
     UI.msg('You slept through the night');
-    Sfx.play('click');
   },
 
   // ---------- portals ----------
@@ -13407,6 +13518,8 @@ const Game = {
       this.sendMyPos(dt);
       this.mpBroadcastDrops(dt);
       this.mpBroadcastEnts(dt);
+      this.mpBroadcastEnv(dt);
+      this.mpUpdateSleep();
       Particles.update(dt, w);
       Weather.update(dt, this);
       // dragon boss bar
