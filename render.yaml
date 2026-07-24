@@ -1,0 +1,10 @@
+# Render Blueprint — deploys the Minecraft PE multiplayer relay as a free web service.
+# Render injects the PORT env var automatically; relay.js reads process.env.PORT.
+services:
+  - type: web
+    name: mcpe-multiplayer-relay
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node relay.js
+    healthCheckPath: /health

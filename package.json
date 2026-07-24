@@ -1,0 +1,17 @@
+{
+  "name": "mcpe-relay",
+  "version": "1.0.0",
+  "description": "Minecraft PE multiplayer relay (dumb WebSocket pairing server)",
+  "main": "relay.js",
+  "scripts": {
+    "start": "node relay.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "ws": "^8.21.1"
+  }
+}
