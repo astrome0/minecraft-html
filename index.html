@@ -2355,6 +2355,18 @@ function buildMobSkins() {
       return v > 0.8 ? [240, 170, 250] : v > 0.5 ? [190, 90, 220] : [130, 40, 170];
     });
   }
+  // ---- PLAYER SKIN SLOTS (uploaded at runtime) ----
+  // Two 64x64 regions in the mob atlas. A classic 64x32 (or 64x64) skin is blitted here
+  // at runtime; the humanoid model 'steve' UV layout (head 0,0 / body 16,16 / arm 40,16 /
+  // leg 0,16) samples the top 64x32 of the slot directly, so no new geometry is needed.
+  // Seeded with the default steve art so the model still shows something before an upload.
+  {
+    const src = MobTexRegions['steve'];
+    for (const name of ['skin_self', 'skin_remote']) {
+      const R = region(name, 64, 64);
+      if (src) ctx.drawImage(Tex.mobCanvas, src[0], src[1], 64, 32, R[0], R[1], 64, 32);
+    }
+  }
 }
 
 // ============ ITEM/BLOCK ICONS (for UI) ============
@@ -5347,6 +5359,13 @@ const Renderer = {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE);
     return t;
   },
+  // push a changed rectangle of the mob atlas canvas to the GPU (used for uploaded skins)
+  updateMobTexRegion(x, y, w, h) {
+    const gl = this.gl;
+    const data = Tex.mobCtx.getImageData(x, y, w, h);
+    gl.bindTexture(gl.TEXTURE_2D, this.mobTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  },
 
   // ---------- chunk meshes ----------
   updateChunkMeshes(world, px, pz, renderDist) {
@@ -6692,12 +6711,17 @@ function humanoidModel(tex, armsOut) {
     ],
     pose(e, out) {
       const sw = Math.sin(e.walkT) * clamp(e.walkAmp, 0, 1) * 0.8;
-      out[0] = bonePose(e, [0, 1.5, 0], { x: e.headPitch || 0, y: headYawLocal(e) });
-      out[1] = bonePose(e, [0, 1.5, 0], {});
+      // sneaking (remote player): drop the upper body and lean the torso forward while
+      // the legs stay planted — reads as a proper vanilla-style crouch. Normal mobs
+      // never set e.sneak, so dip/tilt stay 0 and they're unaffected.
+      const sn = e.sneak ? 1 : 0;
+      const dip = sn * 0.2, tilt = sn * 0.5, fwd = -sn * 0.1;
+      out[0] = bonePose(e, [0, 1.5 - dip, fwd], { x: e.headPitch || 0, y: headYawLocal(e) });
+      out[1] = bonePose(e, [0, 1.5 - dip, 0], { x: tilt });
       if (armsOut) {
         const wave = Math.sin(e.age * 2) * 0.06;
-        out[2] = bonePose(e, [-6 / 16, 1.375, 0], { x: -Math.PI / 2 + wave + sw * 0.15 });
-        out[3] = bonePose(e, [6 / 16, 1.375, 0], { x: -Math.PI / 2 - wave - sw * 0.15 });
+        out[2] = bonePose(e, [-6 / 16, 1.375 - dip, 0], { x: -Math.PI / 2 + wave + sw * 0.15 });
+        out[3] = bonePose(e, [6 / 16, 1.375 - dip, 0], { x: -Math.PI / 2 - wave - sw * 0.15 });
       } else {
         // right arm can play a punch/mine swing when e.swing is set (0=just swung → 1=idle).
         // used for the remote multiplayer player; normal mobs leave e.swing undefined.
@@ -6707,8 +6731,8 @@ function humanoidModel(tex, armsOut) {
           armR = -arc * 1.35 + sw * 0.25; // swing the arm up & forward toward the look dir
           armZ = -arc * 0.15;
         }
-        out[2] = bonePose(e, [-6 / 16, 1.375, 0], { x: armR, z: armZ });
-        out[3] = bonePose(e, [6 / 16, 1.375, 0], { x: -sw });
+        out[2] = bonePose(e, [-6 / 16, 1.375 - dip, 0], { x: armR + tilt, z: armZ });
+        out[3] = bonePose(e, [6 / 16, 1.375 - dip, 0], { x: -sw + tilt });
       }
       out[4] = bonePose(e, [-2 / 16, 0.75, 0], { x: -sw });
       out[5] = bonePose(e, [2 / 16, 0.75, 0], { x: sw });
@@ -10434,7 +10458,7 @@ const UI = {
   drawRemoteNametag(game) {
     const r = game.remote, R = Renderer;
     if (!r || !R.projView) return;
-    const hx = r.dispX, hy = r.dispY + 2.15, hz = r.dispZ; // just above the 1.8-tall model
+    const hx = r.dispX, hy = r.dispY + (r.sn ? 1.95 : 2.15), hz = r.dispZ; // just above the head (lower when crouched)
     const dx = hx - R.camX, dy = hy - R.camY, dz = hz - R.camZ;
     const dist = Math.hypot(dx, dy, dz);
     const maxDist = r.sn ? 8 : 48;                 // sneaking → only visible up close
@@ -10958,6 +10982,9 @@ const UI = {
     const ncur = nfoc && ((performance.now() / 400) | 0) % 2 === 0 ? '_' : '';
     this.textScaled((Game.mpName || '') + ncur, bx + 4, ny + 4, '#ffffff', 1.5);
     this.buttons.push({ id: 'mp_focus_name', x: bx, y: ny, w: 200, h: 20 });
+    // custom-skin upload
+    this.button('mp_upload_skin', bx, H * 0.24 + 34, 200, Game.hasSkin ? 'Change Skin (PNG)' : 'Upload Skin (PNG)');
+    if (Game.hasSkin) this.text('skin loaded', bx + 204, H * 0.24 + 40, '#55ff55');
     // join code field
     this.text('Join Code (6 digits)', bx, H * 0.40, '#a0a0a0');
     const iy = H * 0.40 + 10;
@@ -12183,6 +12210,7 @@ const Game = {
   mpRole: null, isGuest: false, remote: null, mpPosTimer: 0, mpCapturing: null,
   mpDropSeq: 0, mpDropTimer: 0,
   mpEntSeq: 0, mpEntTimer: 0, _remoteProxy: null, mpName: '', remoteName: '',
+  hasSkin: false, remoteHasSkin: false, mySkinData: null, _skinInput: null,
   loadQueue: null,
   pendingSave: null,
   // first-person bare-arm pose (live-tweakable via MC.game.armPose.* for tuning)
@@ -12193,11 +12221,15 @@ const Game = {
   // GPU mesh so the new thickness shows up immediately
   applyArmThick() {
     const t = this.armThick;
-    const box = MOB_MODELS.steve_arm.boxes[0];
-    box.size = [t, 12, t];
-    box.off = [-t / 2 / 16, -12 / 16, -t / 2 / 16];
-    box.uvSize = [4, 12, 4]; // keep sampling the original 4x12x4 skin region, just stretched
-    if (Renderer.mobGeoCache) delete Renderer.mobGeoCache.steve_arm;
+    for (const name of ['steve_arm', 'steve_arm_self']) {
+      const model = MOB_MODELS[name];
+      if (!model) continue;
+      const box = model.boxes[0];
+      box.size = [t, 12, t];
+      box.off = [-t / 2 / 16, -12 / 16, -t / 2 / 16];
+      box.uvSize = [4, 12, 4]; // keep sampling the original 4x12x4 skin region, just stretched
+      if (Renderer.mobGeoCache) delete Renderer.mobGeoCache[name];
+    }
   },
 
   get renderDist() { return 4 + Math.round(this.options.render * 8); },
@@ -12214,7 +12246,14 @@ const Game = {
     MOB_MODELS.steve_arm = { tex: 'steve', boxes: [{ name: 'arm', uv: [40, 16], size: [4, 12, 4], off: [-2 / 16, -12 / 16, -2 / 16] }], pose() {} };
     // full steve model for rendering remote multiplayer players
     MOB_MODELS.steve = humanoidModel('steve', false);
+    // uploaded-skin variants: same geometry, but their UVs sample the skin_self /
+    // skin_remote atlas slots (see textures.js). Used once a skin has been applied.
+    MOB_MODELS.steve_self = humanoidModel('skin_self', false);
+    MOB_MODELS.steve_remote = humanoidModel('skin_remote', false);
+    MOB_MODELS.steve_arm_self = { tex: 'skin_self', boxes: [{ name: 'arm', uv: [40, 16], size: [4, 12, 4], off: [-2 / 16, -12 / 16, -2 / 16] }], pose() {} };
     this.applyArmThick();
+    // restore a previously uploaded skin
+    try { const s = localStorage.getItem('mcpe_skin'); if (s) this.loadSkinDataURL(s, true); } catch (e) {}
     this.last = performance.now();
     requestAnimationFrame(() => this.loop());
   },
@@ -12305,8 +12344,8 @@ const Game = {
     if (this._netInit) return;
     this._netInit = true;
     // a guest joined our hosted world → send them the whole world so they generate it
-    Net.on('guest_joined', () => { if (this.mpRole === 'host' && this.player) { this.mpSendWorld(); this.mpSendHello(); UI.msg('A player joined!'); } });
-    Net.on('guest_left', () => { this.remote = null; this.remoteName = ''; if (this.mpRole === 'host') UI.msg('The other player left'); });
+    Net.on('guest_joined', () => { if (this.mpRole === 'host' && this.player) { this.mpSendWorld(); this.mpSendHello(); this.mpSendSkin(); UI.msg('A player joined!'); } });
+    Net.on('guest_left', () => { this.remote = null; this.remoteName = ''; this.remoteHasSkin = false; if (this.mpRole === 'host') UI.msg('The other player left'); });
     Net.on('world', (m) => this.mpJoinWorld(m));
     Net.on('pos', (m) => this.onRemotePos(m));
     Net.on('blocks', (m) => this.onRemoteBlocks(m));
@@ -12319,8 +12358,9 @@ const Game = {
     Net.on('mhit', (m) => this.onRemoteMobHit(m));      // host: guest hit one of our mobs
     Net.on('phit', (m) => this.onRemotePhit(m));        // either side: the other player hit me
     Net.on('hello', (m) => { this.remoteName = (m.name || '').slice(0, 16) || 'Player'; }); // display name exchange
+    Net.on('skin', (m) => { if (m.data) this.loadSkinDataURL(m.data, false); }); // other player's custom skin
     Net.on('closed', () => {
-      this.remote = null;
+      this.remote = null; this.remoteName = ''; this.remoteHasSkin = false;
       if (this.isGuest) { UI.msg('Disconnected from host', '#ff5555'); }
       else if (this.mpRole === 'host') UI.msg('Multiplayer closed: ' + (Net.errorMsg || ''), '#ff5555');
       this.mpRole = null; this.isGuest = false;
@@ -12355,10 +12395,57 @@ const Game = {
   },
   mpSaveName() { try { localStorage.setItem('mcpe_name', this.mpName || ''); } catch (e) {} },
   mpSendHello() { if (Net.connected) Net.send('hello', { name: this.mpMyName() }); },
+  // ---- custom skin (phase 4e) ----
+  // Blit a loaded skin Image into its atlas slot and push it to the GPU. The classic
+  // parts (top 64x32) line up with the 'steve' humanoid UVs, so it just works.
+  applySkin(img, which) {
+    const region = MobTexRegions[which === 'self' ? 'skin_self' : 'skin_remote'];
+    if (!region || !img || !img.width) return;
+    const [rx, ry] = region, ctx = Tex.mobCtx;
+    ctx.clearRect(rx, ry, 64, 64);
+    ctx.imageSmoothingEnabled = false;
+    const dh = Math.min(64, Math.round(img.height * 64 / img.width)); // 64x32 → 32, 64x64 → 64
+    ctx.drawImage(img, 0, 0, img.width, img.height, rx, ry, 64, dh);
+    Renderer.updateMobTexRegion(rx, ry, 64, 64);
+    if (which === 'self') this.hasSkin = true; else this.remoteHasSkin = true;
+  },
+  loadSkinDataURL(dataURL, isSelf) {
+    const img = new Image();
+    img.onload = () => {
+      this.applySkin(img, isSelf ? 'self' : 'remote');
+      if (isSelf) {
+        this.mySkinData = dataURL;
+        try { localStorage.setItem('mcpe_skin', dataURL); } catch (e) {}
+        if (Net.connected) this.mpSendSkin();
+        UI.msg('Skin applied!');
+      }
+    };
+    img.onerror = () => { if (isSelf) UI.msg('Could not load that image', '#ff5555'); };
+    img.src = dataURL;
+  },
+  // open the OS file picker (must be inside a click gesture) and apply the chosen PNG
+  pickSkin() {
+    if (!this._skinInput) {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.accept = 'image/png,image/*'; inp.style.display = 'none';
+      inp.addEventListener('change', () => {
+        const f = inp.files && inp.files[0]; if (!f) return;
+        const rd = new FileReader();
+        rd.onload = () => this.loadSkinDataURL(rd.result, true);
+        rd.readAsDataURL(f);
+        inp.value = '';
+      });
+      document.body.appendChild(inp);
+      this._skinInput = inp;
+    }
+    this._skinInput.click();
+  },
+  mpSendSkin() { if (Net.connected && this.mySkinData) Net.send('skin', { data: this.mySkinData }); },
   mpJoinWorld(m) {
     // guest side: build the host's world from the payload, spawn beside the host
     this.isGuest = true; this.mpRole = 'guest';
     this.mpSendHello();
+    this.mpSendSkin();
     this.currentWorldId = 0;
     const hp = m.hostPos || { x: 8, y: 70, z: 8 };
     const save = {
@@ -12778,6 +12865,7 @@ const Game = {
         break;
       case 'mp_focus_code': UI.mpFocus = 'code'; if (Mobile.enabled) Mobile.openKeyboard('mpcode'); break;
       case 'mp_focus_name': UI.mpFocus = 'name'; if (Mobile.enabled) Mobile.openKeyboard('mpname'); break;
+      case 'mp_upload_skin': this.pickSkin(); break;
       case 'mp_cancel': Net.disconnect(); this.state = 'mp'; UI.mpCode = ''; break;
       case 'mp_back': Net.disconnect(); this.state = 'title'; break;
       // hosting the currently-loaded world, from the pause menu
@@ -13372,12 +13460,13 @@ const Game = {
   drawRemotePlayer(w) {
     const r = this.remote;
     if (!r) return;
+    const modelName = this.remoteHasSkin ? 'steve_remote' : 'steve';
     const e = {
-      type: 'steve', model: 'steve', x: r.dispX, y: r.dispY, z: r.dispZ, h: 1.8, w: 0.6,
+      type: modelName, model: modelName, x: r.dispX, y: r.dispY, z: r.dispZ, h: 1.8, w: 0.6,
       yaw: r.yaw, headYaw: r.yaw, headPitch: r.pitch, walkT: r.walkT, walkAmp: r.walkAmp, age: r.age,
-      swing: r.swing == null ? 1 : r.swing,
+      swing: r.swing == null ? 1 : r.swing, sneak: r.sn ? 1 : 0,
     };
-    const model = MOB_MODELS.steve;
+    const model = MOB_MODELS[modelName];
     const poses = [];
     model.pose(e, poses);
     const l = w.getLightPacked(floor(e.x), floor(clamp(e.y + 1.0, 0, 127)), floor(e.z));
@@ -13500,8 +13589,9 @@ const Game = {
       Mat4.rotZ(m, arc * -0.2);  // slight roll so the arc reads natural
       Mat4.translate(m, 0, 0, arc * -0.12); // a touch of forward reach into the punch
       Mat4.scale(m, A.scale, A.scale, A.scale);
-      // draw arm box directly
-      Renderer.drawMob({ type: 'steve_arm', model: 'steve_arm' }, [m], light, 0);
+      // draw arm box directly (own uploaded skin if we have one)
+      const armModel = Game.hasSkin ? 'steve_arm_self' : 'steve_arm';
+      Renderer.drawMob({ type: armModel, model: armModel }, [m], light, 0);
     }
     Mat4.copy(Renderer.proj, savedProj);
     Mat4.copy(Renderer.view, savedView);
