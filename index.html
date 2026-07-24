@@ -6711,7 +6711,15 @@ function humanoidModel(tex, armsOut) {
         out[2] = bonePose(e, [-6 / 16, 1.375, 0], { x: -Math.PI / 2 + wave + sw * 0.15 });
         out[3] = bonePose(e, [6 / 16, 1.375, 0], { x: -Math.PI / 2 - wave - sw * 0.15 });
       } else {
-        out[2] = bonePose(e, [-6 / 16, 1.375, 0], { x: sw });
+        // right arm can play a punch/mine swing when e.swing is set (0=just swung → 1=idle).
+        // used for the remote multiplayer player; normal mobs leave e.swing undefined.
+        let armR = sw, armZ = 0;
+        if (e.swing != null && e.swing < 1) {
+          const arc = Math.sin(Math.sqrt(e.swing) * Math.PI); // 0→1→0 snappy out / soft return
+          armR = -arc * 1.35 + sw * 0.25; // swing the arm up & forward toward the look dir
+          armZ = -arc * 0.15;
+        }
+        out[2] = bonePose(e, [-6 / 16, 1.375, 0], { x: armR, z: armZ });
         out[3] = bonePose(e, [6 / 16, 1.375, 0], { x: -sw });
       }
       out[4] = bonePose(e, [-2 / 16, 0.75, 0], { x: -sw });
@@ -6945,6 +6953,25 @@ class ItemEntity extends Entity {
           Sfx.play('pop', { pos: [this.x, this.y, this.z], pitch: 0.8 + Math.random() * 0.6 });
           this.remove();
         } else this.stack.n = left;
+      }
+    }
+    // host authority: also collect on behalf of the remote (guest) player, whose
+    // position we track in Game.remote. Only when the host player isn't also grabbing it.
+    if (typeof Game !== 'undefined' && Game.mpRole === 'host' && Net.connected && Game.remote &&
+        this.pickupDelay <= 0 && !this.dead) {
+      const r = Game.remote;
+      const hostFar = !p || Math.hypot(p.x - this.x, p.y + 0.9 - this.y, p.z - this.z) > 2;
+      const d = Math.hypot(r.dispX - this.x, r.dispY + 0.9 - this.y, r.dispZ - this.z);
+      if (hostFar && d < 2) {
+        const pull = 6 / Math.max(d, 0.3);
+        this.vx += (r.dispX - this.x) / d * pull * dt * 6;
+        this.vy += (r.dispY + 0.6 - this.y) / d * pull * dt * 6;
+        this.vz += (r.dispZ - this.z) / d * pull * dt * 6;
+      }
+      if (hostFar && d < 1.1) {
+        Sfx.play('pop', { pos: [this.x, this.y, this.z], pitch: 0.8 + Math.random() * 0.6 });
+        Game.mpGiveRemote(this.stack);
+        this.remove();
       }
     }
   }
@@ -8176,6 +8203,13 @@ function spawnMob(world, type, x, y, z) {
   return e;
 }
 function spawnItemEntity(world, x, y, z, stack, scatter) {
+  // multiplayer: the guest never owns drops — it asks the host to spawn them and
+  // renders the host's authoritative copy as a puppet. Return a harmless stub so
+  // callers that tweak the "spawned" entity (pickupDelay, velocity) don't crash.
+  if (typeof Game !== 'undefined' && Game.isGuest && Net.connected) {
+    Game.mpDropRequest(x, y, z, stack, !!scatter);
+    return { pickupDelay: 0, vx: 0, vy: 0, vz: 0, dead: false, remove() {} };
+  }
   const e = new ItemEntity(world, x, y, z, stack, scatter);
   world.entities.push(e);
   return e;
@@ -8294,6 +8328,14 @@ function updateEntities(world, dt, game) {
   for (let i = world.entities.length - 1; i >= 0; i--) {
     const e = world.entities[i];
     if (e.dead) { world.entities.splice(i, 1); continue; }
+    // multiplayer puppet drops (guest side): no physics — just glide toward the
+    // host-streamed target position and spin, so drawEntities renders them nicely.
+    if (e.puppet) {
+      e.age += dt;
+      const k = Math.min(1, dt * 12);
+      e.x += (e.tx - e.x) * k; e.y += (e.ty - e.y) * k; e.z += (e.tz - e.z) * k;
+      continue;
+    }
     // skip far entities
     const d = Math.hypot(e.x - p.x, e.z - p.z);
     if (d > 140) { if (e.type === 'item' || e.type === 'xp') continue; }
@@ -8960,7 +9002,7 @@ class Player {
     }
     this.game.onBlockMined(id, held);
   }
-  swingNow() { this.swing = 0; }
+  swingNow() { this.swing = 0; if (this.game.mpNotifySwing) this.game.mpNotifySwing(); }
 
   // ---------- continuous use (hold right click) ----------
   // Re-fires usePress() while the button is held so placing blocks / using items
@@ -12046,6 +12088,7 @@ const Game = {
   showDebug: false,
   // multiplayer (see js/net.js). mpRole: null|'host'|'guest'. remote = the other player.
   mpRole: null, isGuest: false, remote: null, mpPosTimer: 0, mpCapturing: null,
+  mpDropSeq: 0, mpDropTimer: 0,
   loadQueue: null,
   pendingSave: null,
   // first-person bare-arm pose (live-tweakable via MC.game.armPose.* for tuning)
@@ -12173,6 +12216,10 @@ const Game = {
     Net.on('world', (m) => this.mpJoinWorld(m));
     Net.on('pos', (m) => this.onRemotePos(m));
     Net.on('blocks', (m) => this.onRemoteBlocks(m));
+    Net.on('act', (m) => { if (this.remote && m.a === 'swing') this.remote.swing = 0; });
+    Net.on('dropReq', (m) => this.onRemoteDropReq(m)); // host: guest asked us to spawn a drop
+    Net.on('drops', (m) => this.onRemoteDrops(m));      // guest: host's authoritative drop list
+    Net.on('give', (m) => this.onRemoteGive(m));        // guest: host handed us a picked-up stack
     Net.on('closed', () => {
       this.remote = null;
       if (this.isGuest) { UI.msg('Disconnected from host', '#ff5555'); }
@@ -12222,16 +12269,20 @@ const Game = {
   onRemotePos(m) {
     if (!this.remote) {
       this.remote = { tx: m.x, ty: m.y, tz: m.z, dispX: m.x, dispY: m.y, dispZ: m.z,
-        yaw: m.yaw || 0, pitch: m.pitch || 0, walkT: 0, walkAmp: 0, age: 0 };
+        yaw: m.yaw || 0, pitch: m.pitch || 0, walkT: 0, walkAmp: 0, age: 0, swing: 1,
+        held: m.held != null ? m.held : null, mine: m.mine || null };
     } else {
       const r = this.remote;
       r.tx = m.x; r.ty = m.y; r.tz = m.z; r.yaw = m.yaw || 0; r.pitch = m.pitch || 0;
+      r.held = m.held != null ? m.held : null;
+      r.mine = m.mine || null;
     }
   },
   updateRemote(dt) {
     const r = this.remote;
     if (!r) return;
     r.age += dt;
+    if (r.swing != null && r.swing < 1) r.swing = Math.min(1, r.swing + dt * 3.6);
     const k = Math.min(1, dt * 12), ox = r.dispX, oz = r.dispZ;
     r.dispX += (r.tx - r.dispX) * k;
     r.dispY += (r.ty - r.dispY) * k;
@@ -12254,13 +12305,94 @@ const Game = {
     if (m.dim && m.dim !== this.world.dim) return; // only sync the shared (current) dimension for now
     for (const e of m.edits) this.world.setBlock(e[0], e[1], e[2], e[3], e[4]);
   },
+  // ---- dropped-item sync (phase 4b, host-authoritative) ----
+  // Guest asks the host to spawn a drop (guests never own item entities).
+  mpDropRequest(x, y, z, stack, scatter) {
+    if (!Net.connected || !stack) return;
+    Net.send('dropReq', { x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2),
+      id: stack.id, n: stack.n, dur: stack.dur, sc: scatter ? 1 : 0 });
+  },
+  // Host: a guest drop request → spawn a real (authoritative) item entity.
+  onRemoteDropReq(m) {
+    if (this.mpRole !== 'host' || !this.world || !m.id) return;
+    const st = { id: m.id, n: m.n || 1 }; if (m.dur != null) st.dur = m.dur;
+    spawnItemEntity(this.world, m.x, m.y, m.z, st, !!m.sc);
+  },
+  // Host: hand a picked-up stack to the guest.
+  mpGiveRemote(stack) {
+    if (!Net.connected || !stack) return;
+    Net.send('give', { id: stack.id, n: stack.n, dur: stack.dur });
+  },
+  // Guest: host handed us a stack we walked over → add to our inventory.
+  onRemoteGive(m) {
+    if (!this.player || !m.id) return;
+    const st = { id: m.id, n: m.n || 1 }; if (m.dur != null) st.dur = m.dur;
+    const left = this.player.inventory.add(st);
+    Sfx.play('pop', { pitch: 0.8 + Math.random() * 0.6 });
+    if (left > 0 && this.player) { st.n = left; this.mpDropRequest(this.player.x, this.player.y + 0.5, this.player.z, st, true); }
+  },
+  // Host: broadcast the authoritative list of ground items ~8 Hz so the guest can
+  // render them. Each item gets a stable network id (nid) the first time it's sent.
+  mpBroadcastDrops(dt) {
+    if (this.mpRole !== 'host' || !Net.connected || !this.world) return;
+    this.mpDropTimer += dt;
+    if (this.mpDropTimer < 0.125) return;
+    this.mpDropTimer = 0;
+    const list = [];
+    for (const e of this.world.entities) {
+      if (e.dead || e.type !== 'item' || !e.stack) continue;
+      if (e.nid == null) e.nid = ++this.mpDropSeq;
+      list.push([e.nid, e.stack.id, e.stack.n, +e.x.toFixed(2), +e.y.toFixed(2), +e.z.toFixed(2)]);
+    }
+    Net.send('drops', { list });
+  },
+  // Guest: reconcile our puppet item entities with the host's snapshot.
+  onRemoteDrops(m) {
+    if (this.mpRole === 'host' || !this.world || !m.list) return;
+    const w = this.world, seen = new Set();
+    // index existing puppets by nid
+    const byNid = new Map();
+    for (const e of w.entities) if (e.puppet && e.nid != null) byNid.set(e.nid, e);
+    for (const row of m.list) {
+      const nid = row[0], id = row[1], n = row[2], x = row[3], y = row[4], z = row[5];
+      seen.add(nid);
+      let e = byNid.get(nid);
+      if (!e) {
+        e = new ItemEntity(w, x, y, z, { id, n }, false);
+        e.puppet = true; e.nid = nid; e.pickupDelay = 1e9; // never self-picks up
+        e.tx = x; e.ty = y; e.tz = z;
+        w.entities.push(e);
+      } else {
+        e.tx = x; e.ty = y; e.tz = z; e.stack.n = n; e.stack.id = id;
+      }
+    }
+    // drop puppets the host no longer reports (picked up / despawned)
+    for (const e of w.entities) if (e.puppet && !seen.has(e.nid)) e.remove();
+  },
+  // fire a lightweight 'swing' action to the other player whenever we swing our arm
+  // (mining/placing/hitting). Throttled so rapid swings don't flood the relay.
+  mpNotifySwing() {
+    if (!Net.connected) return;
+    const now = performance.now();
+    if (now - (this._lastSwingSend || 0) < 90) return; // ~11/s max
+    this._lastSwingSend = now;
+    Net.send('act', { a: 'swing' });
+  },
   sendMyPos(dt) {
     if (!Net.connected || !this.player) return;
     this.mpPosTimer += dt;
     if (this.mpPosTimer < 0.066) return; // ~15 Hz
     this.mpPosTimer = 0;
     const p = this.player;
-    Net.send('pos', { x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3), yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3) });
+    const held = p.heldItem();
+    // block the other player is currently mining → [x,y,z,stage 0-9] so they see cracks
+    let mine = null;
+    if (p.mining) mine = [p.mining.x, p.mining.y, p.mining.z, clamp(floor(p.mining.progress * 10), 0, 9)];
+    Net.send('pos', {
+      x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
+      yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3),
+      held: held ? held.id : null, mine,
+    });
   },
   onKey(e, down) {
     // when the mobile on-screen keyboard is active, its hidden <input> owns text entry
@@ -12909,6 +13041,7 @@ const Game = {
       updateEntities(w, dt, this);
       this.updateRemote(dt);
       this.sendMyPos(dt);
+      this.mpBroadcastDrops(dt);
       Particles.update(dt, w);
       Weather.update(dt, this);
       // dragon boss bar
@@ -12965,6 +13098,7 @@ const Game = {
     const e = {
       type: 'steve', model: 'steve', x: r.dispX, y: r.dispY, z: r.dispZ, h: 1.8, w: 0.6,
       yaw: r.yaw, headYaw: r.yaw, headPitch: r.pitch, walkT: r.walkT, walkAmp: r.walkAmp, age: r.age,
+      swing: r.swing == null ? 1 : r.swing,
     };
     const model = MOB_MODELS.steve;
     const poses = [];
@@ -12972,6 +13106,21 @@ const Game = {
     const l = w.getLightPacked(floor(e.x), floor(clamp(e.y + 1.0, 0, 127)), floor(e.z));
     const light = [(l >> 4) / 15, (l & 15) / 15];
     Renderer.drawMob(e, poses, light, 0);
+    // item held in the remote player's right hand (poses[2] = their right arm bone)
+    if (r.held != null && Items[r.held] && poses[2]) {
+      const m = Mat4.copy(Mat4.create(), poses[2]);
+      Mat4.translate(m, 0, -0.62, -0.06); // slide down the arm to the fist
+      const def = Items[r.held];
+      if (def.block !== undefined) {
+        Mat4.rotX(m, 0.35);
+        Mat4.scale(m, 0.30, 0.30, 0.30);
+        Renderer.drawGeo(Renderer.getMiniBlock(def.block), m, light, Renderer.atlasTex);
+      } else {
+        Mat4.rotZ(m, -0.6); Mat4.rotY(m, Math.PI / 2);
+        Mat4.scale(m, 0.55, 0.55, 0.55);
+        Renderer.drawGeo(Renderer.getSprite(def.icon || 'missing'), m, light, Renderer.atlasTex);
+      }
+    }
   },
   render(dt) {
     const p = this.player, w = this.world;
@@ -12987,6 +13136,11 @@ const Game = {
     Renderer.drawChunks(w, this.renderDist);
     drawEntities(w, this, dt);
     this.drawRemotePlayer(w);
+    // remote player's mining progress (cracks on the block they're breaking)
+    const rp = this.remote;
+    if (rp && rp.mine && this.state === 'play') {
+      Renderer.drawCrack(rp.mine[0], rp.mine[1], rp.mine[2], clamp(rp.mine[3], 0, 9), w);
+    }
     // block selection + crack
     if (this.state === 'play' && UI.screen === 'none') {
       const dir = p.lookDir();
