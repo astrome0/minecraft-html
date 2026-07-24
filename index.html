@@ -16,8 +16,9 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<canvas id="ui"></canvas><script>
-// ==== core.js ====
+<canvas id="ui"></canvas>
+<script>
+/* ==== js/core.js ==== */
 'use strict';
 // ============ core.js — math, RNG, noise ============
 
@@ -283,7 +284,9 @@ function collideAxis(box, world, axis, delta) {
 // format helpers
 function fmtCoord(n) { return (Math.round(n * 1000) / 1000).toFixed(3); }
 
-// ==== font.js ====
+</script>
+<script>
+/* ==== js/font.js ==== */
 'use strict';
 // ============ font.js — Minecraft-style bitmap font ============
 // Each glyph: array of column bitmasks; bit 0 = top row, rows 0-6 body, row 7 descender.
@@ -385,7 +388,9 @@ const Font = {
   },
 };
 
-// ==== blocks.js ====
+</script>
+<script>
+/* ==== js/blocks.js ==== */
 'use strict';
 // ============ blocks.js — block registry ============
 
@@ -585,7 +590,9 @@ function blockCanHarvest(id, heldItem) {
   return !!(it && it.toolType === def.tool && it.toolTier >= def.tier);
 }
 
-// ==== items.js ====
+</script>
+<script>
+/* ==== js/items.js ==== */
 'use strict';
 // ============ items.js — items, recipes, smelting, fuel ============
 
@@ -842,7 +849,9 @@ function fuelTicks(id) {
 function mkStack(id, n = 1) { const s = { id, n }; if (Items[id] && Items[id].dur) s.dur = Items[id].dur; return s; }
 function stackMax(s) { return Items[s.id] ? Items[s.id].stack : 64; }
 
-// ==== textures.js ====
+</script>
+<script>
+/* ==== js/textures.js ==== */
 'use strict';
 // ============ textures.js — procedural texture atlas ============
 // Atlas: 512x512 = 32x32 tiles of 16px. All art generated with seeded RNG for consistency.
@@ -2497,7 +2506,9 @@ function buildIcons() {
   // leaves special: pre-tinted flat looks bad; ensure iso already set above.
 }
 
-// ==== worldgen.js ====
+</script>
+<script>
+/* ==== js/worldgen.js ==== */
 'use strict';
 // ============ worldgen.js — terrain, biomes, structures for all 3 dimensions ============
 
@@ -3342,7 +3353,9 @@ const Gen = {
   },
 };
 
-// ==== world.js ====
+</script>
+<script>
+/* ==== js/world.js ==== */
 'use strict';
 // ============ world.js — chunks, lighting, fluids, ticking ============
 
@@ -3472,6 +3485,8 @@ class World {
     const oldDef = Blocks[oldId], newDef = Blocks[id];
     c.blocks[i] = id; c.data[i] = data;
     this.edits.set(x + ',' + y + ',' + z, [id, data]);
+    // multiplayer: collect player-caused block changes for broadcast (see Game.mpBeginEdit)
+    if (typeof Game !== 'undefined' && Game.mpCapturing) Game.mpCapturing.push([x, y, z, id, data]);
     // track pressure plates so the world tick can poll them for entities
     if (id === B.PRESSURE_PLATE) this.redstonePlates.add(x + ',' + y + ',' + z);
     else if (oldId === B.PRESSURE_PLATE) this.redstonePlates.delete(x + ',' + y + ',' + z);
@@ -4624,7 +4639,9 @@ function rayBox(ox, oy, oz, dx, dy, dz, b) {
   return { t: tmin, face };
 }
 
-// ==== mesher.js ====
+</script>
+<script>
+/* ==== js/mesher.js ==== */
 'use strict';
 // ============ mesher.js — chunk geometry with smooth lighting + AO ============
 
@@ -5217,7 +5234,9 @@ const Mesher = {
   },
 };
 
-// ==== renderer.js ====
+</script>
+<script>
+/* ==== js/renderer.js ==== */
 'use strict';
 // ============ renderer.js — WebGL rendering ============
 
@@ -6017,7 +6036,9 @@ void main() {
   gl_FragColor = c;
 }`;
 
-// ==== particles.js ====
+</script>
+<script>
+/* ==== js/particles.js ==== */
 'use strict';
 // ============ particles.js — billboard particle system ============
 
@@ -6181,7 +6202,9 @@ const Particles = {
   },
 };
 
-// ==== weather.js ====
+</script>
+<script>
+/* ==== js/weather.js ==== */
 'use strict';
 // ============ weather.js — rain, snow, thunderstorms + lightning ============
 // Only the overworld has weather. Rain falls as snow in cold biomes. Thunderstorms
@@ -6416,7 +6439,9 @@ const Weather = {
   },
 };
 
-// ==== entities.js ====
+</script>
+<script>
+/* ==== js/entities.js ==== */
 'use strict';
 // ============ entities.js — mobs, projectiles, items, dragon ============
 
@@ -8373,7 +8398,9 @@ function drawEntities(world, game, dt) {
   }
 }
 
-// ==== player.js ====
+</script>
+<script>
+/* ==== js/player.js ==== */
 'use strict';
 // ============ player.js — movement, mining, interaction, survival stats ============
 
@@ -8887,7 +8914,9 @@ class Player {
         this.creativeCd = CREATIVE_BREAK_REPEAT;
         Particles.blockBreak(this.world, hit.x, hit.y, hit.z, id);
         Sfx.play('break_' + def.sound, { pos: [hit.x, hit.y, hit.z] });
+        this.game.mpBeginEdit();
         this.world.breakBlock(hit.x, hit.y, hit.z, null);
+        this.game.mpEndEdit();
         this.game.onBlockMined(id, this.heldItem());
       }
       return;
@@ -8916,7 +8945,9 @@ class Player {
     const held = this.heldItem();
     Particles.blockBreak(this.world, x, y, z, id);
     Sfx.play('break_' + def.sound, { pos: [x, y, z] });
+    this.game.mpBeginEdit();
     this.world.breakBlock(x, y, z, held);
+    this.game.mpEndEdit();
     this.addExhaustion(0.025);
     // tool durability
     if (this.game.mode !== 'creative' && held && held.dur !== undefined && Items[held.id].toolType) {
@@ -8997,6 +9028,10 @@ class Player {
   // throttles the auto-repeat while the button is held (see updateUse below).
   usePress() {
     if (this.deadFlag) return;
+    this.game.mpBeginEdit();
+    try { this._usePressImpl(); } finally { this.game.mpEndEdit(); }
+  }
+  _usePressImpl() {
     const dir = this.lookDir();
     const held = this.heldItem();
     const eye = this.eyePos();
@@ -9466,7 +9501,9 @@ class Player {
   }
 }
 
-// ==== sound.js ====
+</script>
+<script>
+/* ==== js/sound.js ==== */
 'use strict';
 // ============ sound.js — WebAudio synth SFX + music ============
 
@@ -9820,7 +9857,9 @@ const Music = {
   },
 };
 
-// ==== ui.js ====
+</script>
+<script>
+/* ==== js/ui.js ==== */
 'use strict';
 // ============ ui.js — HUD + all screens (2D canvas overlay) ============
 
@@ -9835,6 +9874,7 @@ const UI = {
   buttons: [], sliders: [], dragSlider: null,
   seedInput: '', seedFocus: true,
   nameInput: '', createFocus: 'name', selectedWorld: null, createMode: 'survival',
+  mpCode: '', mpFocus: 'code',
   creativeScroll: 0, creativeItems: null,
   toasts: [], messages: [],
   itemNameT: 0, itemNameTxt: '',
@@ -10202,6 +10242,7 @@ const UI = {
   onMouseDown(btn, shift) {
     if (Game.state === 'title') return this.clickButtons();
     if (Game.state === 'create') return this.clickButtons();
+    if (Game.state === 'mp') return this.clickButtons();
     if (Game.state === 'worlds') return this.clickButtons();
     if (Game.state === 'dead' || Game.state === 'win') return this.clickButtons();
     if (this.screen === 'pause' || this.screen === 'options' || this.screen === 'controls') {
@@ -10280,6 +10321,7 @@ const UI = {
     if (game.state === 'title') return this.drawTitle(game);
     if (game.state === 'worlds') return this.drawWorlds(game);
     if (game.state === 'create') return this.drawCreate(game);
+    if (game.state === 'mp') return this.drawMultiplayer(game);
     if (game.state === 'loading') return this.drawLoading(game);
     if (game.state === 'win') return this.drawCredits(game, dt);
     if (game.state === 'play' || game.state === 'dead') {
@@ -10339,6 +10381,14 @@ const UI = {
     const p = game.player;
     const W = this.W(), H = this.H();
     const cx = W / 2;
+    // multiplayer status line (host sees the room code; guest sees connected)
+    if (typeof Net !== 'undefined' && Net.status !== 'idle' && Net.status !== 'closed') {
+      if (game.mpRole === 'host' && Net.code) {
+        this.text('MP Code: ' + Net.code + (Net.peerPresent ? '  (2 players)' : '  (waiting...)'), 2, 2, '#ffff55');
+      } else if (game.isGuest) {
+        this.text('MP: connected', 2, 2, '#55ff55');
+      }
+    }
     // crosshair (inverted). Both arms go in ONE fill() so the overlapping centre
     // pixel is differenced exactly once (no stray dark dot). Both rects share the same
     // centre pixel (cxp,cyp) and reach 4px each way, so the cross is perfectly symmetric.
@@ -10679,6 +10729,8 @@ const UI = {
     let by = H * 0.45;
     this.button('single', bx, by, 200, 'Singleplayer');
     by += 24;
+    this.button('multiplayer_menu', bx, by, 200, 'Multiplayer...');
+    by += 24;
     this.button('options_title', bx, by, 200, 'Options...');
     this.text('Minecraft JS Edition', 2, H - 10, '#ffffff');
     this.text('A tribute recreation', W - Font.width('A tribute recreation') - 2, H - 10, '#ffffff');
@@ -10754,6 +10806,40 @@ const UI = {
     this.button('create_go', W / 2 - 100, cby, 200, 'Create New World');
     this.button('create_back', W / 2 - 100, cby + 24, 200, 'Cancel');
   },
+  drawMultiplayer(game) {
+    this.dirtBg();
+    const W = this.W(), H = this.H();
+    this.textC('Join a Friend', W / 2, H * 0.08);
+    const N = (typeof Net !== 'undefined') ? Net : null;
+    const status = N ? N.status : 'idle';
+    const bx = W / 2 - 100;
+
+    if (N && status === 'connected' && N.role === 'guest') {
+      this.textC('Connected!', W / 2, H * 0.32, '#55ff55');
+      this.textC('Waiting for the world from the host...', W / 2, H * 0.42, '#ffffff');
+      this.button('mp_back', bx, H * 0.6, 200, 'Cancel');
+      return;
+    }
+
+    this.textC('Ask your friend to host, then enter their code', W / 2, H * 0.20, '#c0c0c0');
+    // join code field
+    this.text('Join Code (6 digits)', bx, H * 0.34, '#a0a0a0');
+    const iy = H * 0.34 + 10;
+    this.rect(bx, iy, 200, 20, '#000000');
+    const focused = this.mpFocus === 'code';
+    const ec = focused ? '#ffffff' : '#707070';
+    this.rect(bx, iy, 200, 1, ec); this.rect(bx, iy + 19, 200, 1, ec);
+    this.rect(bx, iy, 1, 20, ec); this.rect(bx + 199, iy, 1, 20, ec);
+    const cursor = focused && ((performance.now() / 400) | 0) % 2 === 0 ? '_' : '';
+    this.textScaled((this.mpCode || '') + cursor, bx + 4, iy + 4, '#ffffff', 1.5);
+    this.buttons.push({ id: 'mp_focus_code', x: bx, y: iy, w: 200, h: 20 });
+    this.button('mp_join', bx, H * 0.34 + 36, 200, 'Join Game');
+
+    if (status === 'connecting' || status === 'joining') this.textC('Connecting...', W / 2, H * 0.56, '#ffff55');
+    if (N && N.errorMsg) this.textC(N.errorMsg, W / 2, H * 0.56, '#ff5555');
+    this.textC('To host your own world: open it, then Pause -> Host', W / 2, H * 0.72, '#909090');
+    this.button('mp_back', W / 2 - 100, H - 30, 200, 'Back');
+  },
   drawLoading(game) {
     this.dirtBg();
     const W = this.W(), H = this.H();
@@ -10766,12 +10852,26 @@ const UI = {
   drawPause(game) {
     this.dimBg(0.5);
     const W = this.W(), H = this.H();
-    this.textC('Game Menu', W / 2, H * 0.22);
+    this.textC('Game Menu', W / 2, H * 0.2);
     const bx = W / 2 - 100;
-    this.button('resume', bx, H * 0.35, 200, 'Back to Game');
-    this.button('options', bx, H * 0.35 + 24, 200, 'Options...');
-    this.button('controls', bx, H * 0.35 + 48, 200, 'Controls');
-    this.button('quit', bx, H * 0.35 + 72, 200, 'Save and Quit to Title');
+    let y = H * 0.32;
+    this.button('resume', bx, y, 200, 'Back to Game'); y += 24;
+    this.button('options', bx, y, 200, 'Options...'); y += 24;
+    this.button('controls', bx, y, 200, 'Controls'); y += 24;
+    // multiplayer row
+    const N = (typeof Net !== 'undefined') ? Net : null;
+    if (game.isGuest) {
+      this.textC('Connected to host', W / 2, y + 3, '#55ff55'); y += 14;
+      this.button('mp_leave', bx, y, 200, 'Leave Game'); y += 24;
+    } else if (game.mpRole === 'host' && N) {
+      const codeTxt = N.code ? ('Code: ' + N.code) : 'Connecting...';
+      const players = N.peerPresent ? '2 players' : 'waiting for player';
+      this.textC(codeTxt + '  (' + players + ')', W / 2, y + 3, '#ffff55'); y += 14;
+      this.button('mp_stop', bx, y, 200, 'Stop Hosting'); y += 24;
+    } else {
+      this.button('mp_host_live', bx, y, 200, 'Host Multiplayer'); y += 24;
+    }
+    this.button('quit', bx, y, 200, 'Save and Quit to Title');
   },
   drawOptions(game) {
     this.dimBg(0.6);
@@ -10854,7 +10954,9 @@ const HUD_ICONS = {
   bubble: { pal: { o: '#2946ff', w: '#9db8ff', h: '#ffffff' }, rows: ['..oooo...', '.owwhho..', 'owwohhoo.', 'owohhhoo.', 'oohhhooo.', '.oohooo..', '..oooo...', '.........', '.........'] },
 };
 
-// ==== chat.js ====
+</script>
+<script>
+/* ==== js/chat.js ==== */
 'use strict';
 // ============ chat.js — T chat, slash commands, tab-complete suggestions ============
 
@@ -11213,7 +11315,120 @@ const Chat = {
   },
 };
 
-// ==== mobile.js ====
+</script>
+<script>
+/* ==== js/net.js ==== */
+'use strict';
+// ============ net.js — multiplayer client: talks to relay.js over WebSocket ============
+// Phase 1: connection + room pairing only. Game-state sync (player positions,
+// block diffs) is layered on top in later phases via Net.send()/Net.on().
+
+const Net = {
+  ws: null,
+  role: null,       // 'host' | 'guest' | null
+  code: null,
+  status: 'idle',    // idle|connecting|hosting|joining|connected|error|closed
+  errorMsg: '',
+  peerPresent: false, // for host: has a guest joined; for guest: always true once joined
+  handlers: {},      // msg type -> [fn(msg)]
+  relayUrl: '',
+
+  defaultRelayUrl() {
+    try {
+      const q = new URLSearchParams(location.search);
+      if (q.has('relay')) return q.get('relay');
+    } catch (e) {}
+    try {
+      const saved = localStorage.getItem('mcpe_relay_url');
+      if (saved) return saved;
+    } catch (e) {}
+    // local dev (localhost / LAN IP over http): talk to a relay on this machine :8127
+    const host = location.hostname;
+    const isLocal = location.protocol !== 'https:' ||
+      host === 'localhost' || host === '127.0.0.1' ||
+      /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
+    if (isLocal) {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return proto + '//' + host + ':8127';
+    }
+    // hosted (GitHub Pages https): the public relay deployed on Render.
+    // Must be wss:// (mixed-content blocks ws:// on an https page). Override
+    // any time with ?relay=wss://... or localStorage.mcpe_relay_url.
+    return 'wss://mcpe-multiplayer-relay.onrender.com';
+  },
+  setRelayUrl(url) {
+    this.relayUrl = url;
+    try { localStorage.setItem('mcpe_relay_url', url); } catch (e) {}
+  },
+
+  on(type, fn) {
+    (this.handlers[type] = this.handlers[type] || []).push(fn);
+  },
+  emit(type, msg) {
+    for (const fn of (this.handlers[type] || [])) { try { fn(msg); } catch (e) { console.error(e); } }
+  },
+
+  _connect(url) {
+    this.disconnect();
+    this.status = 'connecting'; this.errorMsg = '';
+    let ws;
+    try { ws = new WebSocket(url); } catch (e) { this.status = 'error'; this.errorMsg = 'bad relay URL'; return null; }
+    this.ws = ws;
+    ws.onopen = () => this.emit('_open', {});
+    ws.onclose = () => {
+      const wasConnected = this.status === 'connected';
+      this.status = 'closed';
+      this.emit('close', { wasConnected });
+    };
+    ws.onerror = () => { this.status = 'error'; this.errorMsg = 'connection error'; this.emit('error', {}); };
+    ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      this._handleMsg(msg);
+    };
+    return ws;
+  },
+  _handleMsg(msg) {
+    switch (msg.t) {
+      case 'hosted': this.status = 'hosting'; this.code = msg.code; this.role = 'host'; break;
+      case 'joined': this.status = 'connected'; this.code = msg.code; this.role = 'guest'; this.peerPresent = true; break;
+      case 'guest_joined': this.status = 'connected'; this.peerPresent = true; break;
+      case 'guest_left': this.peerPresent = false; this.status = 'hosting'; break;
+      case 'closed': this.status = 'closed'; this.errorMsg = msg.reason || 'room closed'; break;
+      case 'error': this.status = 'error'; this.errorMsg = msg.msg || 'error'; break;
+    }
+    this.emit(msg.t, msg);
+    this.emit('*', msg);
+  },
+
+  host(url) {
+    this.setRelayUrl(url);
+    const ws = this._connect(url);
+    if (!ws) return;
+    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'host' })), { once: true });
+  },
+  join(url, code) {
+    this.setRelayUrl(url);
+    const ws = this._connect(url);
+    if (!ws) return;
+    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'join', code: String(code).trim() })), { once: true });
+  },
+  send(type, data) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const msg = Object.assign({}, data, { t: type });
+    try { this.ws.send(JSON.stringify(msg)); } catch (e) {}
+  },
+  disconnect() {
+    if (this.ws) { try { this.ws.onclose = null; this.ws.close(); } catch (e) {} }
+    this.ws = null; this.role = null; this.code = null; this.status = 'idle';
+    this.peerPresent = false; this.errorMsg = '';
+  },
+  get connected() { return this.status === 'connected'; },
+};
+
+</script>
+<script>
+/* ==== js/mobile.js ==== */
 'use strict';
 // ============ mobile.js — touch controls (Minecraft PE style) ============
 // Adds an on-screen joystick + look-drag + fully repositionable buttons so the
@@ -11593,8 +11808,10 @@ const Mobile = {
     if (target === 'chat') el.value = Chat.input || '';
     else if (target === 'name') el.value = UI.nameInput || '';
     else if (target === 'seed') el.value = UI.seedInput || '';
-    el.maxLength = target === 'chat' ? 100 : 24;
-    el.setAttribute('enterkeyhint', target === 'chat' ? 'send' : 'done');
+    else if (target === 'mpcode') el.value = UI.mpCode || '';
+    el.maxLength = target === 'chat' ? 100 : (target === 'mpcode' ? 6 : 24);
+    el.inputMode = target === 'mpcode' ? 'numeric' : 'text';
+    el.setAttribute('enterkeyhint', target === 'chat' ? 'send' : (target === 'mpcode' ? 'go' : 'done'));
     // focus must run inside the same user gesture for iOS to raise the keyboard
     try { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } catch (e) {}
   },
@@ -11604,12 +11821,14 @@ const Mobile = {
     if (this.kbTarget === 'chat') { Chat.input = v.slice(0, 100); Chat.updateSuggestions(); }
     else if (this.kbTarget === 'name') { UI.nameInput = v.slice(0, 24); }
     else if (this.kbTarget === 'seed') { UI.seedInput = v.slice(0, 24); }
+    else if (this.kbTarget === 'mpcode') { UI.mpCode = v.replace(/[^0-9]/g, '').slice(0, 6); }
   },
   onKbKeydown(e) {
     if (e.key === 'Enter') {
       e.preventDefault();
       if (this.kbTarget === 'chat') { Chat.submit(); this.closeKeyboard(); }
-      else { const t = this.kbTarget; this.closeKeyboard(); this.game.onButton('create_go'); }
+      else if (this.kbTarget === 'mpcode') { this.closeKeyboard(); this.game.onButton('mp_join'); }
+      else { this.closeKeyboard(); this.game.onButton('create_go'); }
     }
   },
   onKbBlur() {
@@ -11792,7 +12011,9 @@ const Mobile = {
   },
 };
 
-// ==== main.js ====
+</script>
+<script>
+/* ==== js/main.js ==== */
 'use strict';
 // ============ main.js — game orchestration ============
 
@@ -11823,6 +12044,8 @@ const Game = {
   creditsScroll: 0, creditsLines: [],
   saveTimer: 0,
   showDebug: false,
+  // multiplayer (see js/net.js). mpRole: null|'host'|'guest'. remote = the other player.
+  mpRole: null, isGuest: false, remote: null, mpPosTimer: 0, mpCapturing: null,
   loadQueue: null,
   pendingSave: null,
   // first-person bare-arm pose (live-tweakable via MC.game.armPose.* for tuning)
@@ -11852,6 +12075,8 @@ const Game = {
     Mobile.init(this);
     // steve arm for first-person view
     MOB_MODELS.steve_arm = { tex: 'steve', boxes: [{ name: 'arm', uv: [40, 16], size: [4, 12, 4], off: [-2 / 16, -12 / 16, -2 / 16] }], pose() {} };
+    // full steve model for rendering remote multiplayer players
+    MOB_MODELS.steve = humanoidModel('steve', false);
     this.applyArmThick();
     this.last = performance.now();
     requestAnimationFrame(() => this.loop());
@@ -11939,6 +12164,104 @@ const Game = {
     this._escClose = true;
     if (document.exitPointerLock) document.exitPointerLock();
   },
+  initNet() {
+    if (this._netInit) return;
+    this._netInit = true;
+    // a guest joined our hosted world → send them the whole world so they generate it
+    Net.on('guest_joined', () => { if (this.mpRole === 'host' && this.player) { this.mpSendWorld(); UI.msg('A player joined!'); } });
+    Net.on('guest_left', () => { this.remote = null; if (this.mpRole === 'host') UI.msg('The other player left'); });
+    Net.on('world', (m) => this.mpJoinWorld(m));
+    Net.on('pos', (m) => this.onRemotePos(m));
+    Net.on('blocks', (m) => this.onRemoteBlocks(m));
+    Net.on('closed', () => {
+      this.remote = null;
+      if (this.isGuest) { UI.msg('Disconnected from host', '#ff5555'); }
+      else if (this.mpRole === 'host') UI.msg('Multiplayer closed: ' + (Net.errorMsg || ''), '#ff5555');
+      this.mpRole = null; this.isGuest = false;
+    });
+  },
+  // ---------- multiplayer world sync (phase 2) ----------
+  netDimSave(w) {
+    // like dimSave but omits the (large, regenerable) spawnedChunks set to keep the
+    // network snapshot small — the guest re-derives spawn tracking on its own.
+    const d = this.dimSave(w);
+    delete d.spawned;
+    return d;
+  },
+  mpSendWorld() {
+    const p = this.player, w = this.world;
+    Net.send('world', {
+      seed: this.seed, mode: this.mode, time: this.time, dim: w.dim,
+      hostPos: { x: p.x, y: p.y, z: p.z },
+      dims: {
+        overworld: this.netDimSave(this.dims.overworld),
+        nether: this.netDimSave(this.dims.nether),
+        end: this.netDimSave(this.dims.end),
+      },
+    });
+  },
+  mpJoinWorld(m) {
+    // guest side: build the host's world from the payload, spawn beside the host
+    this.isGuest = true; this.mpRole = 'guest';
+    this.currentWorldId = 0;
+    const hp = m.hostPos || { x: 8, y: 70, z: 8 };
+    const save = {
+      v: 1, seed: m.seed, time: m.time, dim: m.dim || 'overworld', mode: m.mode || 'survival',
+      dragonKilled: false, dragonSpawned: false, achievements: {},
+      player: {
+        x: hp.x + 1.5, y: hp.y, z: hp.z + 1.5, yaw: 0, pitch: 0,
+        hp: 20, hunger: 20, sat: 5, xp: 0, lvl: 0, prog: 0,
+        inv: new Array(36).fill(null), armor: [null, null, null, null], sel: 0,
+        spawn: [hp.x, hp.y, hp.z], bed: null,
+      },
+      dims: m.dims,
+    };
+    this.startWorld(m.seed, save);
+    UI.msg('Joined! Look around for the other player.');
+  },
+  onRemotePos(m) {
+    if (!this.remote) {
+      this.remote = { tx: m.x, ty: m.y, tz: m.z, dispX: m.x, dispY: m.y, dispZ: m.z,
+        yaw: m.yaw || 0, pitch: m.pitch || 0, walkT: 0, walkAmp: 0, age: 0 };
+    } else {
+      const r = this.remote;
+      r.tx = m.x; r.ty = m.y; r.tz = m.z; r.yaw = m.yaw || 0; r.pitch = m.pitch || 0;
+    }
+  },
+  updateRemote(dt) {
+    const r = this.remote;
+    if (!r) return;
+    r.age += dt;
+    const k = Math.min(1, dt * 12), ox = r.dispX, oz = r.dispZ;
+    r.dispX += (r.tx - r.dispX) * k;
+    r.dispY += (r.ty - r.dispY) * k;
+    r.dispZ += (r.tz - r.dispZ) * k;
+    const moved = Math.hypot(r.dispX - ox, r.dispZ - oz);
+    r.walkAmp = clamp(moved / Math.max(dt, 0.001) / 4, 0, 1);
+    r.walkT += moved * 3.2;
+  },
+  // ---- live block-edit sync (phase 3) ----
+  // Player actions (place/break/interact) are wrapped in mpBeginEdit/mpEndEdit; every
+  // world.setBlock during that window is captured and broadcast to the other player.
+  mpBeginEdit() { if ((this.mpRole || this.isGuest) && Net.connected) this.mpCapturing = []; },
+  mpEndEdit() {
+    const cap = this.mpCapturing;
+    this.mpCapturing = null;
+    if (cap && cap.length && Net.connected) Net.send('blocks', { dim: this.world.dim, edits: cap });
+  },
+  onRemoteBlocks(m) {
+    if (!this.world || !m.edits) return;
+    if (m.dim && m.dim !== this.world.dim) return; // only sync the shared (current) dimension for now
+    for (const e of m.edits) this.world.setBlock(e[0], e[1], e[2], e[3], e[4]);
+  },
+  sendMyPos(dt) {
+    if (!Net.connected || !this.player) return;
+    this.mpPosTimer += dt;
+    if (this.mpPosTimer < 0.066) return; // ~15 Hz
+    this.mpPosTimer = 0;
+    const p = this.player;
+    Net.send('pos', { x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3), yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3) });
+  },
   onKey(e, down) {
     // when the mobile on-screen keyboard is active, its hidden <input> owns text entry
     if (Mobile.enabled && Mobile.kbTarget) return;
@@ -11957,6 +12280,14 @@ const Game = {
     }
     if (this.state === 'worlds' && down) {
       if (code === 'Escape') this.state = 'title';
+      return;
+    }
+    if (this.state === 'mp' && down) {
+      if (code === 'Backspace') UI.mpCode = (UI.mpCode || '').slice(0, -1);
+      else if (code === 'Enter') this.onButton('mp_join');
+      else if (code === 'Escape') this.onButton('mp_back');
+      else if (/^[0-9]$/.test(e.key) && (UI.mpCode || '').length < 6) UI.mpCode = (UI.mpCode || '') + e.key;
+      e.preventDefault();
       return;
     }
     if (!this.player) return;
@@ -12033,6 +12364,18 @@ const Game = {
     }
     switch (id) {
       case 'single': this.state = 'worlds'; UI.selectedWorld = null; break;
+      case 'multiplayer_menu': this.state = 'mp'; UI.mpCode = ''; UI.mpFocus = 'code'; this.mpRole = null; this.isGuest = false; Net.disconnect(); this.initNet(); break;
+      case 'mp_join':
+        if ((UI.mpCode || '').length === 6) { this.initNet(); Net.join(Net.defaultRelayUrl(), UI.mpCode); }
+        else Net.errorMsg = 'Enter a 6-digit code';
+        break;
+      case 'mp_focus_code': UI.mpFocus = 'code'; if (Mobile.enabled) Mobile.openKeyboard('mpcode'); break;
+      case 'mp_cancel': Net.disconnect(); this.state = 'mp'; UI.mpCode = ''; break;
+      case 'mp_back': Net.disconnect(); this.state = 'title'; break;
+      // hosting the currently-loaded world, from the pause menu
+      case 'mp_host_live': this.mpRole = 'host'; this.isGuest = false; this.initNet(); Net.host(Net.defaultRelayUrl()); break;
+      case 'mp_stop': Net.disconnect(); this.remote = null; this.mpRole = null; break;
+      case 'mp_leave': Net.disconnect(); this.remote = null; this.isGuest = false; this.mpRole = null; this.toTitle(); break;
       case 'worlds_play': if (UI.selectedWorld != null) this.loadGame(UI.selectedWorld); break;
       case 'worlds_create': this.state = 'create'; UI.seedInput = ''; UI.nameInput = ''; UI.createFocus = 'name'; UI.createMode = 'survival'; break;
       case 'worlds_delete': if (UI.selectedWorld != null) { this.deleteWorld(UI.selectedWorld); UI.selectedWorld = null; } break;
@@ -12185,21 +12528,24 @@ const Game = {
   },
 
   // ---------- save / load ----------
+  dimSave(w) {
+    return {
+      edits: [...w.edits.entries()],
+      be: [...w.blockEntities.values()].map(be => {
+        const o = { x: be.x, y: be.y, z: be.z, type: be.type };
+        if (be.items) o.items = be.items;
+        if (be.mob) o.mob = be.mob;
+        if (be.burn) { o.burn = be.burn; o.burnMax = be.burnMax; o.cook = be.cook; }
+        return o;
+      }),
+      spawned: [...w.spawnedChunks],
+    };
+  },
   saveGame() {
-    if (!this.player || this.state === 'title') return;
+    if (!this.player || this.state === 'title' || this.isGuest) return; // guests never persist the host's world
     try {
       const p = this.player;
-      const dimSave = (w) => ({
-        edits: [...w.edits.entries()],
-        be: [...w.blockEntities.values()].map(be => {
-          const o = { x: be.x, y: be.y, z: be.z, type: be.type };
-          if (be.items) o.items = be.items;
-          if (be.mob) o.mob = be.mob;
-          if (be.burn) { o.burn = be.burn; o.burnMax = be.burnMax; o.cook = be.cook; }
-          return o;
-        }),
-        spawned: [...w.spawnedChunks],
-      });
+      const dimSave = (w) => this.dimSave(w);
       const save = {
         v: 1, seed: this.seed, time: this.time, dim: this.world.dim, mode: this.mode,
         weather: Weather.state, weatherTime: Weather.timer,
@@ -12238,7 +12584,7 @@ const Game = {
       if (!d) continue;
       w.edits = new Map(d.edits);
       for (const be of d.be) w.blockEntities.set(be.x + ',' + be.y + ',' + be.z, be);
-      w.spawnedChunks = new Set(d.spawned);
+      w.spawnedChunks = new Set(d.spawned || []);
     }
     this.world = this.dims[save.dim];
     const p = this.player, sp = save.player;
@@ -12525,7 +12871,7 @@ const Game = {
   },
   frame(dt) {
     Music.update(dt, this);
-    if (this.state === 'title' || this.state === 'create' || this.state === 'title_options' || this.state === 'worlds') {
+    if (this.state === 'title' || this.state === 'create' || this.state === 'title_options' || this.state === 'worlds' || this.state === 'mp') {
       UI.draw(this, dt);
       return;
     }
@@ -12561,6 +12907,8 @@ const Game = {
       Mobile.update();
       p.update(dt, this);
       updateEntities(w, dt, this);
+      this.updateRemote(dt);
+      this.sendMyPos(dt);
       Particles.update(dt, w);
       Weather.update(dt, this);
       // dragon boss bar
@@ -12611,6 +12959,20 @@ const Game = {
     }
     Renderer.updateChunkMeshes(w, p.x, p.z, rd);
   },
+  drawRemotePlayer(w) {
+    const r = this.remote;
+    if (!r) return;
+    const e = {
+      type: 'steve', model: 'steve', x: r.dispX, y: r.dispY, z: r.dispZ, h: 1.8, w: 0.6,
+      yaw: r.yaw, headYaw: r.yaw, headPitch: r.pitch, walkT: r.walkT, walkAmp: r.walkAmp, age: r.age,
+    };
+    const model = MOB_MODELS.steve;
+    const poses = [];
+    model.pose(e, poses);
+    const l = w.getLightPacked(floor(e.x), floor(clamp(e.y + 1.0, 0, 127)), floor(e.z));
+    const light = [(l >> 4) / 15, (l & 15) / 15];
+    Renderer.drawMob(e, poses, light, 0);
+  },
   render(dt) {
     const p = this.player, w = this.world;
     // camera with view bob (shared with aim raycasts via p.eyePos())
@@ -12624,6 +12986,7 @@ const Game = {
     Renderer.beginFrame(eye[0], eye[1], eye[2], p.yaw, p.pitch, this.curFovSmooth);
     Renderer.drawChunks(w, this.renderDist);
     drawEntities(w, this, dt);
+    this.drawRemotePlayer(w);
     // block selection + crack
     if (this.state === 'play' && UI.screen === 'none') {
       const dir = p.lookDir();
