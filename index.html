@@ -2114,6 +2114,8 @@ function boxUVRects(u, v, w, h, d) {
   };
 }
 const MobTexRegions = {}; // name → [x,y,w,h] in mob atlas
+// uploaded-skin slots for the OTHER players in a room (max room size 10 = us + 9)
+const MAX_REMOTE_SKINS = 9;
 function buildMobSkins() {
   const ctx = Tex.mobCtx;
   const fill = (region, rect, colorFn) => {
@@ -2356,13 +2358,17 @@ function buildMobSkins() {
     });
   }
   // ---- PLAYER SKIN SLOTS (uploaded at runtime) ----
-  // Two 64x64 regions in the mob atlas. A classic 64x32 (or 64x64) skin is blitted here
-  // at runtime; the humanoid model 'steve' UV layout (head 0,0 / body 16,16 / arm 40,16 /
-  // leg 0,16) samples the top 64x32 of the slot directly, so no new geometry is needed.
-  // Seeded with the default steve art so the model still shows something before an upload.
+  // 64x64 regions in the mob atlas: one for our own skin plus MAX_REMOTE_SKINS for the
+  // other players in a multiplayer room (a room holds at most 10 players, so 9 others).
+  // A classic 64x32 (or 64x64) skin is blitted here at runtime; the humanoid model
+  // 'steve' UV layout (head 0,0 / body 16,16 / arm 40,16 / leg 0,16) samples the top
+  // 64x32 of the slot directly, so no new geometry is needed. Seeded with the default
+  // steve art so a model still shows something before an upload.
   {
     const src = MobTexRegions['steve'];
-    for (const name of ['skin_self', 'skin_remote']) {
+    const names = ['skin_self'];
+    for (let i = 0; i < MAX_REMOTE_SKINS; i++) names.push('skin_remote' + i);
+    for (const name of names) {
       const R = region(name, 64, 64);
       if (src) ctx.drawImage(Tex.mobCanvas, src[0], src[1], 64, 32, R[0], R[1], 64, 32);
     }
@@ -6972,23 +6978,30 @@ class ItemEntity extends Entity {
         } else this.stack.n = left;
       }
     }
-    // host authority: also collect on behalf of the remote (guest) player, whose
-    // position we track in Game.remote. Only when the host player isn't also grabbing it.
-    if (typeof Game !== 'undefined' && Game.mpRole === 'host' && Net.connected && Game.remote &&
+    // host authority: also collect on behalf of every guest, whose positions we track
+    // in Game.remotes. Only when the host player isn't also grabbing it; the nearest
+    // guest inside pickup range wins.
+    if (typeof Game !== 'undefined' && Game.mpRole === 'host' && Net.connected && Game.remotes.size &&
         this.pickupDelay <= 0 && !this.dead) {
-      const r = Game.remote;
       const hostFar = !p || Math.hypot(p.x - this.x, p.y + 0.9 - this.y, p.z - this.z) > 2;
-      const d = Math.hypot(r.dispX - this.x, r.dispY + 0.9 - this.y, r.dispZ - this.z);
-      if (hostFar && d < 2) {
-        const pull = 6 / Math.max(d, 0.3);
-        this.vx += (r.dispX - this.x) / d * pull * dt * 6;
-        this.vy += (r.dispY + 0.6 - this.y) / d * pull * dt * 6;
-        this.vz += (r.dispZ - this.z) / d * pull * dt * 6;
-      }
-      if (hostFar && d < 1.1) {
-        Sfx.play('pop', { pos: [this.x, this.y, this.z], pitch: 0.8 + Math.random() * 0.6 });
-        Game.mpGiveRemote(this.stack);
-        this.remove();
+      if (hostFar) {
+        let near = null, nearD = 2;
+        for (const r of Game.remotes.values()) {
+          if (!r.seen) continue;
+          const d = Math.hypot(r.dispX - this.x, r.dispY + 0.9 - this.y, r.dispZ - this.z);
+          if (d < nearD) { nearD = d; near = r; }
+        }
+        if (near) {
+          const pull = 6 / Math.max(nearD, 0.3);
+          this.vx += (near.dispX - this.x) / nearD * pull * dt * 6;
+          this.vy += (near.dispY + 0.6 - this.y) / nearD * pull * dt * 6;
+          this.vz += (near.dispZ - this.z) / nearD * pull * dt * 6;
+          if (nearD < 1.1) {
+            Sfx.play('pop', { pos: [this.x, this.y, this.z], pitch: 0.8 + Math.random() * 0.6 });
+            Game.mpGiveRemote(near.pid, this.stack);
+            this.remove();
+          }
+        }
       }
     }
   }
@@ -7022,7 +7035,7 @@ class XPOrb extends Entity {
   }
 }
 class Arrow extends Entity {
-  constructor(world, x, y, z, dx, dy, dz, speed, dmg, fromPlayer, owner = null) {
+  constructor(world, x, y, z, dx, dy, dz, speed, dmg, fromPlayer, owner = null, ownerPid = null) {
     super(world, x, y, z);
     this.type = 'arrow';
     this.w = 0.1; this.h = 0.1;
@@ -7031,6 +7044,9 @@ class Arrow extends Entity {
     this.dmg = dmg;
     this.fromPlayer = fromPlayer;
     this.owner = owner; // the entity that fired it — never hit your own shooter
+    // multiplayer: which player fired it (null = the local one, a pid = a remote one).
+    // Arrows are host-authoritative, so a guest's shot is re-created here with their pid.
+    this.ownerPid = ownerPid;
     this.stuck = false;
     this.crit = dmg >= 9;
   }
@@ -7064,7 +7080,7 @@ class Arrow extends Entity {
     }
     // player hit (hostile arrows, or a guest-fired arrow hitting the host = PvP)
     const p = game && game.world === this.world ? game.player : null;
-    if ((!this.fromPlayer || this.owner === 'guest') && p && !p.deadFlag) {
+    if ((!this.fromPlayer || this.ownerPid != null) && p && !p.deadFlag) {
       const bb = [p.x - 0.4, p.y - 0.1, p.z - 0.4, p.x + 0.4, p.y + 1.9, p.z + 0.4];
       const r = rayBox(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, bb);
       if (r && r.t < step && r.t < hitT) {
@@ -7074,16 +7090,18 @@ class Arrow extends Entity {
         return;
       }
     }
-    // multiplayer (host): arrows can strike the remote player, except the guest's own
-    if (game && game.mpRemoteHittable && game.mpRemoteHittable() && this.owner !== 'guest') {
-      const rt = game.remote;
-      const bb = [rt.dispX - 0.4, rt.dispY - 0.1, rt.dispZ - 0.4, rt.dispX + 0.4, rt.dispY + 1.9, rt.dispZ + 0.4];
-      const r = rayBox(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, bb);
-      if (r && r.t < step && r.t < hitT) {
-        game.mpSendPhit(this.dmg, this.x, this.z, this.crit);
-        Sfx.play('arrowHit', { pos: [this.x, this.y, this.z] });
-        this.remove();
-        return;
+    // multiplayer (host): arrows can strike any remote player except their own shooter
+    if (game && game.mpRemoteHittable && game.mpRemoteHittable()) {
+      for (const rt of game.remotes.values()) {
+        if (!rt.seen || rt.pid === this.ownerPid) continue;
+        const bb = [rt.dispX - 0.4, rt.dispY - 0.1, rt.dispZ - 0.4, rt.dispX + 0.4, rt.dispY + 1.9, rt.dispZ + 0.4];
+        const r = rayBox(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, bb);
+        if (r && r.t < step && r.t < hitT) {
+          game.mpSendPhit(rt.pid, this.dmg, this.x, this.z, this.crit);
+          Sfx.play('arrowHit', { pos: [this.x, this.y, this.z] });
+          this.remove();
+          return;
+        }
       }
     }
     if (hitEnt && (!hit || hitT < hit.t)) {
@@ -7453,8 +7471,8 @@ class HostileMob extends Mob {
     if (game.mode === 'creative') return null;
     if (game.world !== this.world) return null;
     const p = (game.player && !game.player.deadFlag) ? game.player : null;
-    // multiplayer (host): also consider the remote player, pick the nearer one
-    const rp = game.mpRemoteTarget ? game.mpRemoteTarget() : null;
+    // multiplayer (host): also consider the other players, pick the nearest of them all
+    const rp = game.mpNearestRemoteTarget ? game.mpNearestRemoteTarget(this.x, this.z) : null;
     if (p && rp) {
       return Math.hypot(p.x - this.x, p.z - this.z) <= Math.hypot(rp.x - this.x, rp.z - this.z) ? p : rp;
     }
@@ -9588,7 +9606,8 @@ class Player {
     const dmg = Math.max(1, Math.round(2 + power * 6 + (crit ? 2 : 0)));
     const ax = this.x + dir[0] * 0.4, ay = this.eyeY() - 0.1, az = this.z + dir[2] * 0.4;
     if (this.game.isGuest && Net.connected) {
-      // host-authority: the host owns the flying arrow (marked 'guest' so it can hit the host, not us)
+      // host-authority: the host owns the flying arrow and tags it with our pid, so it
+      // can hit every other player in the room but never comes back at us
       this.game.mpSpawnRequest('arrow', { x: ax, y: ay, z: az, dx: dir[0], dy: dir[1], dz: dir[2], sp: 14 + power * 32, dmg });
     } else {
       this.world.entities.push(new Arrow(this.world, ax, ay, az, dir[0], dir[1], dir[2], 14 + power * 32, dmg, true));
@@ -10416,7 +10435,9 @@ const UI = {
   },
   msg(text, color) {
     this.messages.push({ text, t: 0, color });
-    if (this.messages.length > 10) this.messages.shift();
+    // keep a real backlog so opening chat (T / mobile button) later still shows history,
+    // not just whatever hasn't faded out of the on-screen toast in the last few seconds
+    if (this.messages.length > 60) this.messages.shift();
   },
   showItemName(stack) {
     if (!stack) { this.itemNameT = 0; return; }
@@ -10442,7 +10463,7 @@ const UI = {
     if (game.state === 'win') return this.drawCredits(game, dt);
     if (game.state === 'play' || game.state === 'dead') {
       this.drawOverlays(game);
-      if (game.remote && game.remoteName) this.drawRemoteNametag(game);
+      if (game.remotes && game.remotes.size) this.drawRemoteNametags(game);
       if (this.screen === 'none' && game.state === 'play') this.drawHUD(game, dt);
       if (game.showDebug) this.drawF3(game);
       this.drawMessages(dt);
@@ -10459,11 +10480,16 @@ const UI = {
     }
   },
 
-  // ---------- world-space nametag over the remote player ----------
-  // Vanilla feel: normally readable THROUGH blocks; while the remote is sneaking it
-  // only shows with a clear line of sight and at reduced opacity (harder to spot).
-  drawRemoteNametag(game) {
-    const r = game.remote, R = Renderer;
+  // ---------- world-space nametags over the other players ----------
+  // Vanilla feel: normally readable THROUGH blocks; while a player is sneaking their
+  // tag only shows with a clear line of sight and at reduced opacity (harder to spot).
+  drawRemoteNametags(game) {
+    for (const r of game.remotes.values()) {
+      if (r.seen && r.name) this.drawRemoteNametag(game, r);
+    }
+  },
+  drawRemoteNametag(game, r) {
+    const R = Renderer;
     if (!r || !R.projView) return;
     const hx = r.dispX, hy = r.dispY + (r.sn ? 1.95 : 2.15), hz = r.dispZ; // just above the head (lower when crouched)
     const dx = hx - R.camX, dy = hy - R.camY, dz = hz - R.camZ;
@@ -10488,7 +10514,7 @@ const UI = {
     const W = this.W(), H = this.H();
     const vx = (ndcX * 0.5 + 0.5) * W;
     const vy = (1 - (ndcY * 0.5 + 0.5)) * H;
-    const name = game.remoteName;
+    const name = r.name;
     const tw = Font.width(name);
     const px = Math.round(vx - tw / 2 - 2), py = Math.round(vy - 5);
     const oldA = this.ctx.globalAlpha;
@@ -10539,16 +10565,16 @@ const UI = {
     const cx = W / 2;
     // multiplayer status line (host sees the room code; guest sees connected)
     if (typeof Net !== 'undefined' && Net.status !== 'idle' && Net.status !== 'closed') {
+      const seats = '  (' + Net.count + '/' + Net.slots + ' players)';
       if (game.mpRole === 'host' && Net.code) {
-        this.text('MP Code: ' + Net.code + (Net.peerPresent ? '  (2 players)' : '  (waiting...)'), 2, 2, '#ffff55');
+        this.text('MP Code: ' + Net.code + (Net.peerPresent ? seats : '  (waiting...)'), 2, 2, '#ffff55');
       } else if (game.isGuest) {
-        this.text('MP: connected', 2, 2, '#55ff55');
+        this.text('MP: connected' + seats, 2, 2, '#55ff55');
       }
     }
-    // sleeping: both players must be in a bed before the night is skipped
+    // sleeping: every player must be in a bed before the night is skipped
     if (game.sleeping) {
-      const n = game.remoteSleeping ? 2 : 1;
-      this.textC('Sleeping (' + n + '/2) — move to get up', cx, H * 0.42, '#ffff99');
+      this.textC('Sleeping (' + game.mpSleepCount() + '/' + game.mpPlayerCount() + ') — move to get up', cx, H * 0.42, '#ffff99');
     }
     // crosshair (inverted). Both arms go in ONE fill() so the overlapping centre
     // pixel is differenced exactly once (no stray dark dot). Both rects share the same
@@ -10669,18 +10695,23 @@ const UI = {
     }
   },
   drawMessages(dt) {
-    if (Chat.open) return; // chat overlay draws the history itself
+    if (Chat.open) return; // chat overlay draws the full history itself
     const H = this.H();
+    // vanilla-style toast: recent messages fade out after ~6s, but they are NOT removed
+    // from this.messages here — they stay in the backlog so opening chat (T / mobile
+    // button) afterward still shows them, sliding above the input field
+    let shown = 0;
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const m = this.messages[i];
       m.t += dt;
-      if (m.t > 6) { this.messages.splice(i, 1); continue; }
+      if (m.t > 6) continue;
       const a = m.t > 5 ? 1 - (m.t - 5) : 1;
       this.ctx.globalAlpha = a;
-      const y = H - 50 - (this.messages.length - 1 - i) * 10;
+      const y = H - 50 - shown * 10;
       this.rect(2, y - 1, Font.width(m.text) + 4, 10, 'rgba(0,0,0,0.4)');
       this.text(m.text, 4, y, m.color || '#ffffff');
       this.ctx.globalAlpha = 1;
+      shown++;
     }
   },
   drawToasts(dt) {
@@ -11038,15 +11069,20 @@ const UI = {
     // multiplayer row
     const N = (typeof Net !== 'undefined') ? Net : null;
     if (game.isGuest) {
-      this.textC('Connected to host', W / 2, y + 3, '#55ff55'); y += 14;
+      this.textC('Connected to host  (' + N.count + '/' + N.slots + ')', W / 2, y + 3, '#55ff55'); y += 14;
       this.button('mp_leave', bx, y, 200, 'Leave Game'); y += 24;
     } else if (game.mpRole === 'host' && N) {
       const codeTxt = N.code ? ('Code: ' + N.code) : 'Connecting...';
-      const players = N.peerPresent ? '2 players' : 'waiting for player';
+      const players = N.peerPresent ? (N.count + '/' + N.slots + ' players') : 'waiting for players';
       this.textC(codeTxt + '  (' + players + ')', W / 2, y + 3, '#ffff55'); y += 14;
-      this.button('mp_stop', bx, y, 200, 'Stop Hosting'); y += 24;
+      // the room can still be resized while it's live (never below who's already in)
+      this.button('mp_slots', bx, y, 96, 'Slots: ' + N.slots);
+      this.button('mp_stop', bx + 104, y, 96, 'Stop'); y += 24;
     } else {
-      this.button('mp_host_live', bx, y, 200, 'Host Multiplayer'); y += 24;
+      // how many players your world will hold, you included — set before you host
+      this.button('mp_slots', bx, y, 96, 'Slots: ' + game.mpSlots);
+      this.button('mp_host_live', bx + 104, y, 96, 'Host World'); y += 24;
+      this.textC('you + ' + (game.mpSlots - 1) + ' friend' + (game.mpSlots === 2 ? '' : 's'), W / 2, y, '#909090'); y += 12;
     }
     this.button('quit', bx, y, 200, 'Save and Quit to Title');
   },
@@ -11385,7 +11421,10 @@ const Chat = {
       if (this.sent[this.sent.length - 1] !== text) this.sent.push(text);
       if (this.sent.length > 32) this.sent.shift();
       if (text[0] === '/') Commands.run(text);
-      else UI.msg('<Player> ' + text);
+      else {
+        UI.msg('<' + Game.mpMyName() + '> ' + text);
+        Game.mpSendChat(text);
+      }
     }
     this.close();
   },
@@ -11495,18 +11534,28 @@ const Chat = {
 <script>
 'use strict';
 // ============ net.js — multiplayer client: talks to relay.js over WebSocket ============
-// Phase 1: connection + room pairing only. Game-state sync (player positions,
-// block diffs) is layered on top in later phases via Net.send()/Net.on().
+// Connection + room membership. Game-state sync (player positions, block diffs,
+// entities) is layered on top in main.js via Net.send()/Net.on().
+//
+// Peer ids: the host is pid 0, guests get 1..slots-1. Net.peers holds every OTHER
+// player currently in the room. Net.send(type, data, to) targets a single peer
+// when `to` is given, otherwise the relay broadcasts it to everyone but us.
 
 const Net = {
   ws: null,
   role: null,       // 'host' | 'guest' | null
   code: null,
+  pid: null,        // our own peer id (0 = host)
+  peers: [],        // other players' pids currently in the room
+  slots: 2,         // max players in the room (host included)
   status: 'idle',    // idle|connecting|hosting|joining|connected|error|closed
   errorMsg: '',
-  peerPresent: false, // for host: has a guest joined; for guest: always true once joined
   handlers: {},      // msg type -> [fn(msg)]
   relayUrl: '',
+
+  get count() { return this.peers.length + (this.pid == null ? 0 : 1); },
+  // true once there is somebody else to talk to
+  get peerPresent() { return this.peers.length > 0; },
 
   defaultRelayUrl() {
     try {
@@ -11553,6 +11602,7 @@ const Net = {
     ws.onclose = () => {
       const wasConnected = this.status === 'connected';
       this.status = 'closed';
+      this.peers = [];
       this.emit('close', { wasConnected });
     };
     ws.onerror = () => { this.status = 'error'; this.errorMsg = 'connection error'; this.emit('error', {}); };
@@ -11563,24 +11613,52 @@ const Net = {
     };
     return ws;
   },
+  // host: 'hosting' while alone, 'connected' once at least one guest is in
+  _refreshStatus() {
+    if (this.role === 'host') this.status = this.peers.length ? 'connected' : 'hosting';
+  },
   _handleMsg(msg) {
     switch (msg.t) {
-      case 'hosted': this.status = 'hosting'; this.code = msg.code; this.role = 'host'; break;
-      case 'joined': this.status = 'connected'; this.code = msg.code; this.role = 'guest'; this.peerPresent = true; break;
-      case 'guest_joined': this.status = 'connected'; this.peerPresent = true; break;
-      case 'guest_left': this.peerPresent = false; this.status = 'hosting'; break;
-      case 'closed': this.status = 'closed'; this.errorMsg = msg.reason || 'room closed'; break;
+      case 'hosted':
+        this.status = 'hosting'; this.code = msg.code; this.role = 'host';
+        this.pid = 0; this.peers = []; this.slots = msg.slots || this.slots;
+        break;
+      case 'joined':
+        this.status = 'connected'; this.code = msg.code; this.role = 'guest';
+        this.pid = msg.pid; this.peers = (msg.peers || []).slice();
+        this.slots = msg.slots || this.slots;
+        break;
+      case 'peer_join':
+        if (!this.peers.includes(msg.pid)) this.peers.push(msg.pid);
+        if (msg.slots) this.slots = msg.slots;
+        this._refreshStatus();
+        break;
+      case 'peer_leave':
+        this.peers = this.peers.filter((p) => p !== msg.pid);
+        if (msg.slots) this.slots = msg.slots;
+        this._refreshStatus();
+        break;
+      case 'room':
+        if (msg.slots) this.slots = msg.slots;
+        break;
+      case 'closed': this.status = 'closed'; this.peers = []; this.errorMsg = msg.reason || 'room closed'; break;
       case 'error': this.status = 'error'; this.errorMsg = msg.msg || 'error'; break;
     }
     this.emit(msg.t, msg);
     this.emit('*', msg);
   },
 
-  host(url) {
+  host(url, slots) {
     this.setRelayUrl(url);
+    this.slots = Math.max(2, Math.min(10, slots || 2));
     const ws = this._connect(url);
     if (!ws) return;
-    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'host' })), { once: true });
+    ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'host', slots: this.slots })), { once: true });
+  },
+  // host only: resize the room while it's already live
+  setSlots(n) {
+    this.slots = Math.max(2, Math.min(10, n));
+    if (this.role === 'host') this.send('slots', { n: this.slots });
   },
   join(url, code) {
     this.setRelayUrl(url);
@@ -11588,15 +11666,17 @@ const Net = {
     if (!ws) return;
     ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'join', code: String(code).trim() })), { once: true });
   },
-  send(type, data) {
+  // `to` = a peer pid for a private message; omit to broadcast to the whole room
+  send(type, data, to) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const msg = Object.assign({}, data, { t: type });
+    if (to != null) msg.to = to;
     try { this.ws.send(JSON.stringify(msg)); } catch (e) {}
   },
   disconnect() {
     if (this.ws) { try { this.ws.onclose = null; this.ws.close(); } catch (e) {} }
     this.ws = null; this.role = null; this.code = null; this.status = 'idle';
-    this.peerPresent = false; this.errorMsg = '';
+    this.pid = null; this.peers = []; this.errorMsg = '';
   },
   get connected() { return this.status === 'connected'; },
 };
@@ -12220,12 +12300,15 @@ const Game = {
   creditsScroll: 0, creditsLines: [],
   saveTimer: 0,
   showDebug: false,
-  // multiplayer (see js/net.js). mpRole: null|'host'|'guest'. remote = the other player.
-  mpRole: null, isGuest: false, remote: null, mpPosTimer: 0, mpCapturing: null,
+  // multiplayer (see js/net.js). mpRole: null|'host'|'guest'.
+  // remotes: pid -> the other players' interpolated state (the host is always pid 0).
+  mpRole: null, isGuest: false, remotes: new Map(), mpPosTimer: 0, mpCapturing: null,
   mpDropSeq: 0, mpDropTimer: 0,
-  mpEntSeq: 0, mpEntTimer: 0, _remoteProxy: null, mpName: '', remoteName: '',
-  hasSkin: false, remoteHasSkin: false, mySkinData: null, _skinInput: null, _skinInputRect: null,
-  mpEnvTimer: 0, sleeping: false, remoteSleeping: false,
+  mpEntSeq: 0, mpEntTimer: 0, _remoteProxies: new Map(), mpName: '',
+  hasSkin: false, mySkinData: null, _skinInput: null, _skinInputRect: null,
+  mpSlots: 4, // room size the host offers (total players, us included)
+  freeSkinSlots: null,
+  mpEnvTimer: 0, sleeping: false,
   loadQueue: null,
   pendingSave: null,
   // first-person bare-arm pose (live-tweakable via MC.game.armPose.* for tuning)
@@ -12265,13 +12348,15 @@ const Game = {
     // full steve model for rendering remote multiplayer players
     MOB_MODELS.steve = humanoidModel('steve', false);
     // uploaded-skin variants: same geometry, but their UVs sample the skin_self /
-    // skin_remote atlas slots (see textures.js). Used once a skin has been applied.
+    // skin_remoteN atlas slots (see textures.js). Used once a skin has been applied.
+    // One slot per other player in the room (max room size 10 → 9 remote slots).
     MOB_MODELS.steve_self = humanoidModel('skin_self', false);
-    MOB_MODELS.steve_remote = humanoidModel('skin_remote', false);
+    for (let i = 0; i < MAX_REMOTE_SKINS; i++) MOB_MODELS['steve_remote' + i] = humanoidModel('skin_remote' + i, false);
     MOB_MODELS.steve_arm_self = { tex: 'skin_self', boxes: [{ name: 'arm', uv: [40, 16], size: [4, 12, 4], off: [-2 / 16, -12 / 16, -2 / 16] }], pose() {} };
     this.applyArmThick();
     // restore a previously uploaded skin
     try { const s = localStorage.getItem('mcpe_skin'); if (s) this.loadSkinDataURL(s, true); } catch (e) {}
+    try { const n = parseInt(localStorage.getItem('mcpe_slots'), 10); if (n) this.mpSlots = clamp(n, 2, 10); } catch (e) {}
     this.last = performance.now();
     requestAnimationFrame(() => this.loop());
   },
@@ -12361,32 +12446,100 @@ const Game = {
   initNet() {
     if (this._netInit) return;
     this._netInit = true;
-    // a guest joined our hosted world → send them the whole world so they generate it
-    Net.on('guest_joined', () => { if (this.mpRole === 'host' && this.player) { this.mpSendWorld(); this.mpSendHello(); this.mpSendSkin(); UI.msg('A player joined!'); } });
-    Net.on('guest_left', () => { this.remote = null; this.remoteName = ''; this.remoteHasSkin = false; this.remoteSleeping = false; if (this.mpRole === 'host') UI.msg('The other player left'); });
+    // somebody new is in the room: greet them, and (if we host) hand them the world
+    Net.on('peer_join', (m) => this.onPeerJoin(m));
+    Net.on('peer_leave', (m) => this.onPeerLeave(m));
     Net.on('world', (m) => this.mpJoinWorld(m));
     Net.on('pos', (m) => this.onRemotePos(m));
     Net.on('blocks', (m) => this.onRemoteBlocks(m));
-    Net.on('act', (m) => { if (this.remote && m.a === 'swing') this.remote.swing = 0; });
-    Net.on('dropReq', (m) => this.onRemoteDropReq(m)); // host: guest asked us to spawn a drop
+    Net.on('act', (m) => { const r = this.remotes.get(m.from); if (r && m.a === 'swing') r.swing = 0; });
+    Net.on('dropReq', (m) => this.onRemoteDropReq(m)); // host: a guest asked us to spawn a drop
     Net.on('drops', (m) => this.onRemoteDrops(m));      // guest: host's authoritative drop list
     Net.on('give', (m) => this.onRemoteGive(m));        // guest: host handed us a picked-up stack
     Net.on('ents', (m) => this.onRemoteEnts(m));        // guest: host's authoritative mob/projectile snapshot
-    Net.on('spawnReq', (m) => this.onRemoteSpawnReq(m));// host: guest asked us to spawn a mob/tnt/arrow
-    Net.on('mhit', (m) => this.onRemoteMobHit(m));      // host: guest hit one of our mobs
-    Net.on('phit', (m) => this.onRemotePhit(m));        // either side: the other player hit me
-    Net.on('hello', (m) => { this.remoteName = (m.name || '').slice(0, 16) || 'Player'; }); // display name exchange
-    Net.on('skin', (m) => { if (m.data) this.loadSkinDataURL(m.data, false); }); // other player's custom skin
+    Net.on('spawnReq', (m) => this.onRemoteSpawnReq(m));// host: a guest asked us to spawn a mob/tnt/arrow
+    Net.on('mhit', (m) => this.onRemoteMobHit(m));      // host: a guest hit one of our mobs
+    Net.on('phit', (m) => this.onRemotePhit(m));        // anyone: another player hit me
+    Net.on('hello', (m) => { const r = this.getRemote(m.from); if (r) r.name = (m.name || '').slice(0, 16) || 'Player'; });
+    Net.on('chat', (m) => { const r = this.getRemote(m.from); UI.msg('<' + ((r && r.name) || 'Player') + '> ' + (m.text || '').slice(0, 200)); });
+    Net.on('skin', (m) => { if (m.data) this.loadRemoteSkin(m.from, m.data); }); // another player's custom skin
     Net.on('env', (m) => this.onRemoteEnv(m));   // guest: host's authoritative time + weather
-    Net.on('sleep', (m) => this.onRemoteSleep(m)); // the other player got into / out of a bed
+    Net.on('sleep', (m) => this.onRemoteSleep(m)); // another player got into / out of a bed
     Net.on('wake', (m) => this.onRemoteWake(m));   // host decided everyone slept → morning
     Net.on('closed', () => {
-      this.remote = null; this.remoteName = ''; this.remoteHasSkin = false;
-      this.sleeping = false; this.remoteSleeping = false;
+      this.clearRemotes();
+      this.sleeping = false;
       if (this.isGuest) { UI.msg('Disconnected from host', '#ff5555'); }
       else if (this.mpRole === 'host') UI.msg('Multiplayer closed: ' + (Net.errorMsg || ''), '#ff5555');
       this.mpRole = null; this.isGuest = false;
     });
+  },
+  // ---------- the other players in the room (phase 5: any number, not just one) ----------
+  // Each remote is created lazily the first time we hear anything from that pid, and
+  // owns one of the MAX_REMOTE_SKINS atlas slots so everyone can wear their own skin.
+  getRemote(pid) {
+    if (pid == null || pid === Net.pid) return null;
+    let r = this.remotes.get(pid);
+    if (!r) {
+      r = {
+        pid, name: '', seen: false,
+        tx: 0, ty: 0, tz: 0, dispX: 0, dispY: 0, dispZ: 0,
+        yaw: 0, pitch: 0, walkT: 0, walkAmp: 0, age: 0, swing: 1,
+        held: null, mine: null, sn: 0, sleeping: false,
+        hasSkin: false, slot: this.allocSkinSlot(),
+      };
+      this.remotes.set(pid, r);
+    }
+    return r;
+  },
+  removeRemote(pid) {
+    const r = this.remotes.get(pid);
+    if (!r) return;
+    this.remotes.delete(pid);
+    this._remoteProxies.delete(pid);
+    this.freeSkinSlot(r.slot);
+  },
+  clearRemotes() {
+    for (const pid of Array.from(this.remotes.keys())) this.removeRemote(pid);
+    this._remoteProxies.clear();
+  },
+  allocSkinSlot() {
+    if (!this.freeSkinSlots) {
+      this.freeSkinSlots = [];
+      for (let i = 0; i < MAX_REMOTE_SKINS; i++) this.freeSkinSlots.push(i);
+    }
+    return this.freeSkinSlots.length ? this.freeSkinSlots.shift() : null;
+  },
+  // hand a slot back and restore the default steve art so the next player to take it
+  // doesn't inherit the previous occupant's uploaded skin
+  freeSkinSlot(slot) {
+    if (slot == null || !this.freeSkinSlots || this.freeSkinSlots.includes(slot)) return;
+    this.resetSkinSlot('skin_remote' + slot);
+    this.freeSkinSlots.push(slot);
+    this.freeSkinSlots.sort((a, b) => a - b);
+  },
+  resetSkinSlot(name) {
+    const R = MobTexRegions[name], src = MobTexRegions['steve'];
+    if (!R || !src || !Tex.mobCtx) return;
+    const ctx = Tex.mobCtx;
+    ctx.clearRect(R[0], R[1], 64, 64);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(Tex.mobCanvas, src[0], src[1], 64, 32, R[0], R[1], 64, 32);
+    Renderer.updateMobTexRegion(R[0], R[1], 64, 64);
+  },
+  onPeerJoin(m) {
+    const pid = m.pid;
+    if (this.mpRole === 'host' && this.player) this.mpSendWorld(pid);
+    this.mpSendHello(pid);
+    this.mpSendSkin(pid);
+    UI.msg('A player joined!  (' + Net.count + '/' + Net.slots + ')');
+  },
+  onPeerLeave(m) {
+    const r = this.remotes.get(m.pid);
+    const name = (r && r.name) ? r.name : 'A player';
+    this.removeRemote(m.pid);
+    UI.msg(name + ' left  (' + Net.count + '/' + Net.slots + ')');
+    this.mpCheckSleep();
   },
   // ---------- multiplayer world sync (phase 2) ----------
   netDimSave(w) {
@@ -12396,7 +12549,9 @@ const Game = {
     delete d.spawned;
     return d;
   },
-  mpSendWorld() {
+  // `to` = the pid of the player who just joined (the world snapshot is big, so it's
+  // only ever sent to the one peer that needs it, never broadcast to the whole room)
+  mpSendWorld(to) {
     const p = this.player, w = this.world;
     Net.send('world', {
       seed: this.seed, mode: this.mode, time: this.time, dim: w.dim,
@@ -12406,7 +12561,7 @@ const Game = {
         nether: this.netDimSave(this.dims.nether),
         end: this.netDimSave(this.dims.end),
       },
-    });
+    }, to);
   },
   // ---- display name (phase 4d) ----
   mpMyName() {
@@ -12416,12 +12571,16 @@ const Game = {
     return (this.mpName || 'Player').slice(0, 16);
   },
   mpSaveName() { try { localStorage.setItem('mcpe_name', this.mpName || ''); } catch (e) {} },
-  mpSendHello() { if (Net.connected) Net.send('hello', { name: this.mpMyName() }); },
+  // `to` omitted = tell the whole room; `to` set = only the peer that just joined
+  mpSendHello(to) { Net.send('hello', { name: this.mpMyName() }, to); },
+  // broadcast a chat line to every other player in the room (routed via relay, not the host)
+  mpSendChat(text) { if (Net.connected) Net.send('chat', { text: String(text).slice(0, 200) }); },
   // ---- custom skin (phase 4e) ----
-  // Blit a loaded skin Image into its atlas slot and push it to the GPU. The classic
+  // Blit a loaded skin Image into an atlas slot and push it to the GPU. The classic
   // parts (top 64x32) line up with the 'steve' humanoid UVs, so it just works.
+  // `which` is 'self' or a remote skin slot index (0..MAX_REMOTE_SKINS-1).
   applySkin(img, which) {
-    const region = MobTexRegions[which === 'self' ? 'skin_self' : 'skin_remote'];
+    const region = MobTexRegions[which === 'self' ? 'skin_self' : 'skin_remote' + which];
     if (!region || !img || !img.width) return;
     const [rx, ry] = region, ctx = Tex.mobCtx;
     ctx.clearRect(rx, ry, 64, 64);
@@ -12429,20 +12588,32 @@ const Game = {
     const dh = Math.min(64, Math.round(img.height * 64 / img.width)); // 64x32 → 32, 64x64 → 64
     ctx.drawImage(img, 0, 0, img.width, img.height, rx, ry, 64, dh);
     Renderer.updateMobTexRegion(rx, ry, 64, 64);
-    if (which === 'self') this.hasSkin = true; else this.remoteHasSkin = true;
+    if (which === 'self') this.hasSkin = true;
   },
   loadSkinDataURL(dataURL, isSelf) {
     const img = new Image();
     img.onload = () => {
-      this.applySkin(img, isSelf ? 'self' : 'remote');
+      this.applySkin(img, isSelf ? 'self' : 0);
       if (isSelf) {
         this.mySkinData = dataURL;
         try { localStorage.setItem('mcpe_skin', dataURL); } catch (e) {}
-        if (Net.connected) this.mpSendSkin();
+        this.mpSendSkin();
         UI.msg('Skin applied!');
       }
     };
     img.onerror = () => { if (isSelf) UI.msg('Could not load that image', '#ff5555'); };
+    img.src = dataURL;
+  },
+  // another player's skin arrived → paint it into that player's own atlas slot
+  loadRemoteSkin(pid, dataURL) {
+    const r = this.getRemote(pid);
+    if (!r || r.slot == null) return;
+    const img = new Image();
+    img.onload = () => {
+      if (this.remotes.get(pid) !== r) return; // they left while the image decoded
+      this.applySkin(img, r.slot);
+      r.hasSkin = true;
+    };
     img.src = dataURL;
   },
   // open the OS file picker (must be inside a click gesture) and apply the chosen PNG.
@@ -12495,7 +12666,7 @@ const Game = {
   },
   // desktop / fallback path: open the picker from the button handler's click gesture
   pickSkin() { this.ensureSkinInput().click(); },
-  mpSendSkin() { if (Net.connected && this.mySkinData) Net.send('skin', { data: this.mySkinData }); },
+  mpSendSkin(to) { if (this.mySkinData) Net.send('skin', { data: this.mySkinData }, to); },
   // ---- world time + weather sync (host-authoritative) ----
   // The host owns the clock and the weather; the guest keeps ticking its own time
   // smoothly between updates and just snaps to the host's value when one arrives.
@@ -12507,29 +12678,42 @@ const Game = {
     Net.send('env', { time: Math.round(this.time), w: Weather.state, wt: Math.round(Weather.timer) });
   },
   onRemoteEnv(m) {
-    if (this.mpRole === 'host') return;
+    if (this.mpRole === 'host' || m.from !== 0) return; // only the host owns the clock
     if (m.time != null) this.time = m.time;
     if (m.w && m.w !== Weather.state) Weather.set(m.w, m.wt);
     else if (m.wt != null) Weather.timer = m.wt;
   },
-  // ---- multiplayer sleeping: everyone has to be in a bed before the night is skipped ----
+  // ---- multiplayer sleeping: EVERYONE has to be in a bed before the night is skipped ----
+  // how many of us are in a bed, and how many players there are in total
+  mpSleepCount() {
+    let n = this.sleeping ? 1 : 0;
+    for (const r of this.remotes.values()) if (r.sleeping) n++;
+    return n;
+  },
+  mpPlayerCount() { return Net.connected ? Net.count : 1; },
   onRemoteSleep(m) {
-    this.remoteSleeping = !!m.v;
-    if (this.remoteSleeping) UI.msg((this.remoteName || 'The other player') + ' is sleeping (' + (this.sleeping ? 2 : 1) + '/2)');
+    const r = this.getRemote(m.from);
+    if (r) r.sleeping = !!m.v;
+    if (r && r.sleeping) UI.msg((r.name || 'A player') + ' is sleeping (' + this.mpSleepCount() + '/' + this.mpPlayerCount() + ')');
     this.mpCheckSleep();
   },
-  // host only: once both players are in bed, skip to morning and tell the guest
+  // host only: once every player is in bed, skip to morning and tell the room
   mpCheckSleep() {
-    if (this.mpRole !== 'host' || !this.sleeping || !this.remoteSleeping) return;
+    if (this.mpRole !== 'host' || !this.sleeping || !Net.connected) return;
+    if (this.mpSleepCount() < this.mpPlayerCount()) return;
     this.time = Math.ceil(this.time / 24000) * 24000 + 100;
-    this.sleeping = false; this.remoteSleeping = false;
+    this.clearSleepers();
     Weather.set('clear'); // vanilla: a night's sleep clears the storm
     Net.send('wake', { time: Math.round(this.time) });
     this.mpEnvTimer = 99; // force an env push on the next frame
     UI.msg('You slept through the night');
   },
+  clearSleepers() {
+    this.sleeping = false;
+    for (const r of this.remotes.values()) r.sleeping = false;
+  },
   onRemoteWake(m) {
-    this.sleeping = false; this.remoteSleeping = false;
+    this.clearSleepers();
     if (m.time != null) this.time = m.time;
     UI.msg('You slept through the night');
   },
@@ -12545,6 +12729,7 @@ const Game = {
     }
   },
   mpJoinWorld(m) {
+    if (m.from !== 0) return; // only the host hands out worlds
     // guest side: build the host's world from the payload, spawn beside the host
     this.isGuest = true; this.mpRole = 'guest';
     this.mpSendHello();
@@ -12566,30 +12751,26 @@ const Game = {
     UI.msg('Joined! Look around for the other player.');
   },
   onRemotePos(m) {
-    if (!this.remote) {
-      this.remote = { tx: m.x, ty: m.y, tz: m.z, dispX: m.x, dispY: m.y, dispZ: m.z,
-        yaw: m.yaw || 0, pitch: m.pitch || 0, walkT: 0, walkAmp: 0, age: 0, swing: 1,
-        held: m.held != null ? m.held : null, mine: m.mine || null, sn: m.sn ? 1 : 0 };
-    } else {
-      const r = this.remote;
-      r.tx = m.x; r.ty = m.y; r.tz = m.z; r.yaw = m.yaw || 0; r.pitch = m.pitch || 0;
-      r.held = m.held != null ? m.held : null;
-      r.mine = m.mine || null;
-      r.sn = m.sn ? 1 : 0;
-    }
-  },
-  updateRemote(dt) {
-    const r = this.remote;
+    const r = this.getRemote(m.from);
     if (!r) return;
-    r.age += dt;
-    if (r.swing != null && r.swing < 1) r.swing = Math.min(1, r.swing + dt * 3.6);
-    const k = Math.min(1, dt * 12), ox = r.dispX, oz = r.dispZ;
-    r.dispX += (r.tx - r.dispX) * k;
-    r.dispY += (r.ty - r.dispY) * k;
-    r.dispZ += (r.tz - r.dispZ) * k;
-    const moved = Math.hypot(r.dispX - ox, r.dispZ - oz);
-    r.walkAmp = clamp(moved / Math.max(dt, 0.001) / 4, 0, 1);
-    r.walkT += moved * 3.2;
+    r.tx = m.x; r.ty = m.y; r.tz = m.z; r.yaw = m.yaw || 0; r.pitch = m.pitch || 0;
+    r.held = m.held != null ? m.held : null;
+    r.mine = m.mine || null;
+    r.sn = m.sn ? 1 : 0;
+    if (!r.seen) { r.seen = true; r.dispX = m.x; r.dispY = m.y; r.dispZ = m.z; }
+  },
+  updateRemotes(dt) {
+    for (const r of this.remotes.values()) {
+      r.age += dt;
+      if (r.swing != null && r.swing < 1) r.swing = Math.min(1, r.swing + dt * 3.6);
+      const k = Math.min(1, dt * 12), ox = r.dispX, oz = r.dispZ;
+      r.dispX += (r.tx - r.dispX) * k;
+      r.dispY += (r.ty - r.dispY) * k;
+      r.dispZ += (r.tz - r.dispZ) * k;
+      const moved = Math.hypot(r.dispX - ox, r.dispZ - oz);
+      r.walkAmp = clamp(moved / Math.max(dt, 0.001) / 4, 0, 1);
+      r.walkT += moved * 3.2;
+    }
   },
   // ---- live block-edit sync (phase 3) ----
   // Player actions (place/break/interact) are wrapped in mpBeginEdit/mpEndEdit; every
@@ -12610,7 +12791,7 @@ const Game = {
   mpDropRequest(x, y, z, stack, scatter) {
     if (!Net.connected || !stack) return;
     Net.send('dropReq', { x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2),
-      id: stack.id, n: stack.n, dur: stack.dur, sc: scatter ? 1 : 0 });
+      id: stack.id, n: stack.n, dur: stack.dur, sc: scatter ? 1 : 0 }, 0);
   },
   // Host: a guest drop request → spawn a real (authoritative) item entity.
   onRemoteDropReq(m) {
@@ -12618,10 +12799,10 @@ const Game = {
     const st = { id: m.id, n: m.n || 1 }; if (m.dur != null) st.dur = m.dur;
     spawnItemEntity(this.world, m.x, m.y, m.z, st, !!m.sc);
   },
-  // Host: hand a picked-up stack to the guest.
-  mpGiveRemote(stack) {
+  // Host: hand a picked-up stack to the guest who walked over it.
+  mpGiveRemote(pid, stack) {
     if (!Net.connected || !stack) return;
-    Net.send('give', { id: stack.id, n: stack.n, dur: stack.dur });
+    Net.send('give', { id: stack.id, n: stack.n, dur: stack.dur }, pid);
   },
   // Guest: host handed us a stack we walked over → add to our inventory.
   onRemoteGive(m) {
@@ -12648,7 +12829,7 @@ const Game = {
   },
   // Guest: reconcile our puppet item entities with the host's snapshot.
   onRemoteDrops(m) {
-    if (this.mpRole === 'host' || !this.world || !m.list) return;
+    if (this.mpRole === 'host' || m.from !== 0 || !this.world || !m.list) return;
     const w = this.world, seen = new Set();
     // index existing item puppets by nid (mob/projectile puppets have their own nid
     // space on the 'ents' channel, so only reconcile the ones carrying a stack)
@@ -12715,7 +12896,7 @@ const Game = {
   },
   // Guest: reconcile our puppet mobs/projectiles with the host's snapshot.
   onRemoteEnts(m) {
-    if (this.mpRole === 'host' || !this.world || !m.list) return;
+    if (this.mpRole === 'host' || m.from !== 0 || !this.world || !m.list) return;
     const w = this.world, seen = new Set();
     const byNid = new Map();
     for (const e of w.entities) if (e.puppet && !e.stack && e.nid != null) byNid.set(e.nid, e);
@@ -12755,7 +12936,8 @@ const Game = {
     const w = this.world;
     if (m.k === 'mob') spawnMob(w, m.mt, m.x, m.y, m.z);
     else if (m.k === 'tnt') spawnPrimedTNT(w, m.x, m.y, m.z, m.fuse || 80);
-    else if (m.k === 'arrow') w.entities.push(new Arrow(w, m.x, m.y, m.z, m.dx, m.dy, m.dz, m.sp, m.dmg, true, 'guest'));
+    // the arrow remembers WHICH player fired it so it can't hit its own shooter
+    else if (m.k === 'arrow') w.entities.push(new Arrow(w, m.x, m.y, m.z, m.dx, m.dy, m.dz, m.sp, m.dmg, true, null, m.from));
   },
   // Host: guest melee-hit one of our mobs → apply the damage authoritatively.
   onRemoteMobHit(m) {
@@ -12770,19 +12952,19 @@ const Game = {
   // Guest: ask the host to spawn a host-authoritative entity on our behalf.
   mpSpawnRequest(kind, data) {
     if (!Net.connected) return;
-    Net.send('spawnReq', Object.assign({ k: kind }, data));
+    Net.send('spawnReq', Object.assign({ k: kind }, data), 0);
   },
   // Guest: tell the host we melee-hit one of their mobs.
   mpSendMobHit(nid, dmg, srcX, srcZ) {
     if (!Net.connected || nid == null) return;
-    Net.send('mhit', { n: nid, d: dmg, x: +srcX.toFixed(2), z: +srcZ.toFixed(2) });
+    Net.send('mhit', { n: nid, d: dmg, x: +srcX.toFixed(2), z: +srcZ.toFixed(2) }, 0);
   },
   // ---- player-vs-player / mob-vs-remote damage ----
-  mpRemoteHittable() { return this.mpRole === 'host' && !!this.remote && this.state === 'play'; },
-  // Send "you got hit" to the other player (they apply it to their own local body).
-  mpSendPhit(dmg, srcX, srcZ, crit) {
-    if (!Net.connected) return;
-    Net.send('phit', { d: dmg, x: +srcX.toFixed(2), z: +srcZ.toFixed(2), c: crit ? 1 : 0 });
+  mpRemoteHittable() { return this.mpRole === 'host' && this.remotes.size > 0 && this.state === 'play'; },
+  // Send "you got hit" to one specific player (they apply it to their own local body).
+  mpSendPhit(pid, dmg, srcX, srcZ, crit) {
+    if (!Net.connected || pid == null) return;
+    Net.send('phit', { d: dmg, x: +srcX.toFixed(2), z: +srcZ.toFixed(2), c: crit ? 1 : 0 }, pid);
   },
   onRemotePhit(m) {
     const p = this.player;
@@ -12790,38 +12972,55 @@ const Game = {
     p.takeDamage(m.d || 1, { x: m.x, y: p.y, z: m.z, knock: 0.9 });
     if (m.c) Particles.burst('crit', p.x, p.y + 1, p.z, 8);
   },
-  // A proxy for the remote player so host mob AI can target & damage the guest.
-  mpRemoteTarget() {
-    if (this.mpRole !== 'host' || !this.remote || this.state !== 'play') return null;
-    const r = this.remote, game = this;
-    if (!this._remoteProxy) {
-      this._remoteProxy = {
-        deadFlag: false,
-        takeDamage(dmg, src) { game.mpSendPhit(dmg, src ? src.x : this.x, src ? src.z : this.z, false); },
+  // A proxy per remote player so host mob AI can target & damage them like a real
+  // player object. Returns the NEAREST one to (x,z), or null when we don't host.
+  mpNearestRemoteTarget(x, z) {
+    if (this.mpRole !== 'host' || !this.remotes.size || this.state !== 'play') return null;
+    let best = null, bestD = 1e9;
+    for (const r of this.remotes.values()) {
+      if (!r.seen) continue;
+      const d = (r.dispX - x) * (r.dispX - x) + (r.dispZ - z) * (r.dispZ - z);
+      if (d < bestD) { bestD = d; best = r; }
+    }
+    return best ? this.mpProxyFor(best) : null;
+  },
+  mpProxyFor(r) {
+    const game = this;
+    let px = this._remoteProxies.get(r.pid);
+    if (!px) {
+      px = {
+        pid: r.pid, deadFlag: false,
+        takeDamage(dmg, src) { game.mpSendPhit(this.pid, dmg, src ? src.x : this.x, src ? src.z : this.z, false); },
         lookDir() {
           const cp = Math.cos(this.pitch || 0);
           return [Math.sin(this.yaw || 0) * cp, -Math.sin(this.pitch || 0), -Math.cos(this.yaw || 0) * cp];
         },
       };
+      this._remoteProxies.set(r.pid, px);
     }
-    const px = this._remoteProxy;
     px.x = r.dispX; px.y = r.dispY; px.z = r.dispZ; px.yaw = r.yaw; px.pitch = r.pitch;
     return px;
   },
-  // Try to melee the other player (called from player.attackPress when no mob was hit).
+  // Try to melee another player (called from player.attackPress when no mob was hit).
+  // With more than two players in the room, the nearest one along the look ray wins.
   mpTryHitRemote(dir, p) {
-    if (!Net.connected || !this.remote) return false;
-    const r = this.remote;
+    if (!Net.connected || !this.remotes.size) return false;
     const eye = p.eyePos();
-    const bb = [r.dispX - 0.4, r.dispY - 0.1, r.dispZ - 0.4, r.dispX + 0.4, r.dispY + 1.9, r.dispZ + 0.4];
-    const hit = rayBox(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], bb);
-    if (!hit || hit.t > 3.2) return false;
-    if (this.world.raycast(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], hit.t)) return false; // block in the way
+    let target = null, bestT = 3.2;
+    for (const r of this.remotes.values()) {
+      if (!r.seen) continue;
+      const bb = [r.dispX - 0.4, r.dispY - 0.1, r.dispZ - 0.4, r.dispX + 0.4, r.dispY + 1.9, r.dispZ + 0.4];
+      const hit = rayBox(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], bb);
+      if (!hit || hit.t > bestT) continue;
+      if (this.world.raycast(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], hit.t)) continue; // block in the way
+      bestT = hit.t; target = r;
+    }
+    if (!target) return false;
     const held = p.heldItem();
     let dmg = held && Items[held.id] && Items[held.id].dmg ? Items[held.id].dmg : 1;
     let crit = false;
     if (!p.onGround && p.vy < 0 && !p.sprinting) { dmg = Math.round(dmg * 1.5); crit = true; }
-    this.mpSendPhit(dmg, p.x, p.z, crit);
+    this.mpSendPhit(target.pid, dmg, p.x, p.z, crit);
     Sfx.play(crit ? 'attackCrit' : 'attackHit');
     return true;
   },
@@ -12961,7 +13160,7 @@ const Game = {
     }
     switch (id) {
       case 'single': this.state = 'worlds'; UI.selectedWorld = null; break;
-      case 'multiplayer_menu': this.state = 'mp'; UI.mpCode = ''; UI.mpFocus = 'name'; this.mpMyName(); this.mpRole = null; this.isGuest = false; Net.disconnect(); this.initNet(); break;
+      case 'multiplayer_menu': this.state = 'mp'; UI.mpCode = ''; UI.mpFocus = 'name'; this.mpMyName(); this.mpRole = null; this.isGuest = false; Net.disconnect(); this.clearRemotes(); this.initNet(); break;
       case 'mp_join':
         if ((UI.mpCode || '').length === 6) { this.initNet(); Net.join(Net.defaultRelayUrl(), UI.mpCode); }
         else Net.errorMsg = 'Enter a 6-digit code';
@@ -12972,9 +13171,15 @@ const Game = {
       case 'mp_cancel': Net.disconnect(); this.state = 'mp'; UI.mpCode = ''; break;
       case 'mp_back': Net.disconnect(); this.state = 'title'; break;
       // hosting the currently-loaded world, from the pause menu
-      case 'mp_host_live': this.mpRole = 'host'; this.isGuest = false; this.initNet(); Net.host(Net.defaultRelayUrl()); break;
-      case 'mp_stop': Net.disconnect(); this.remote = null; this.mpRole = null; break;
-      case 'mp_leave': Net.disconnect(); this.remote = null; this.isGuest = false; this.mpRole = null; this.toTitle(); break;
+      case 'mp_host_live': this.mpRole = 'host'; this.isGuest = false; this.initNet(); Net.host(Net.defaultRelayUrl(), this.mpSlots); break;
+      // how many players the room may hold (us included) — cycles 2..10, wraps round
+      case 'mp_slots':
+        this.mpSlots = this.mpSlots >= 10 ? 2 : this.mpSlots + 1;
+        try { localStorage.setItem('mcpe_slots', String(this.mpSlots)); } catch (e) {}
+        if (this.mpRole === 'host' && Net.role === 'host') Net.setSlots(this.mpSlots);
+        break;
+      case 'mp_stop': Net.disconnect(); this.clearRemotes(); this.mpRole = null; break;
+      case 'mp_leave': Net.disconnect(); this.clearRemotes(); this.isGuest = false; this.mpRole = null; this.toTitle(); break;
       case 'worlds_play': if (UI.selectedWorld != null) this.loadGame(UI.selectedWorld); break;
       case 'worlds_create': this.state = 'create'; UI.seedInput = ''; UI.nameInput = ''; UI.createFocus = 'name'; UI.createMode = 'survival'; break;
       case 'worlds_delete': if (UI.selectedWorld != null) { this.deleteWorld(UI.selectedWorld); UI.selectedWorld = null; } break;
@@ -13268,12 +13473,12 @@ const Game = {
     }
     this.player.bedSpawn = { x: x + 0.5, y: y + 1, z: z + 0.5 };
     Sfx.play('click');
-    // multiplayer: BOTH players have to be in a bed before the night is skipped
+    // multiplayer: EVERY player has to be in a bed before the night is skipped
     if (Net.connected) {
       this.sleeping = true;
       Net.send('sleep', { v: 1 });
       this.mpCheckSleep();
-      if (this.sleeping) UI.msg('Sleeping (1/2) — waiting for ' + (this.remoteName || 'the other player'));
+      if (this.sleeping) UI.msg('Sleeping (' + this.mpSleepCount() + '/' + this.mpPlayerCount() + ') — waiting for the others');
       return;
     }
     this.time = Math.ceil(this.time / 24000) * 24000 + 100;
@@ -13514,7 +13719,7 @@ const Game = {
       Mobile.update();
       p.update(dt, this);
       updateEntities(w, dt, this);
-      this.updateRemote(dt);
+      this.updateRemotes(dt);
       this.sendMyPos(dt);
       this.mpBroadcastDrops(dt);
       this.mpBroadcastEnts(dt);
@@ -13570,16 +13775,18 @@ const Game = {
     }
     Renderer.updateChunkMeshes(w, p.x, p.z, rd);
   },
-  drawRemotePlayer(w) {
-    const r = this.remote;
-    if (!r) return;
-    const modelName = this.remoteHasSkin ? 'steve_remote' : 'steve';
+  drawRemotePlayers(w) {
+    for (const r of this.remotes.values()) if (r.seen) this.drawRemotePlayer(w, r);
+  },
+  drawRemotePlayer(w, r) {
+    const modelName = (r.hasSkin && r.slot != null) ? 'steve_remote' + r.slot : 'steve';
     const e = {
       type: modelName, model: modelName, x: r.dispX, y: r.dispY, z: r.dispZ, h: 1.8, w: 0.6,
       yaw: r.yaw, headYaw: r.yaw, headPitch: r.pitch, walkT: r.walkT, walkAmp: r.walkAmp, age: r.age,
       swing: r.swing == null ? 1 : r.swing, sneak: r.sn ? 1 : 0,
     };
     const model = MOB_MODELS[modelName];
+    if (!model) return;
     const poses = [];
     model.pose(e, poses);
     const l = w.getLightPacked(floor(e.x), floor(clamp(e.y + 1.0, 0, 127)), floor(e.z));
@@ -13614,11 +13821,12 @@ const Game = {
     Renderer.beginFrame(eye[0], eye[1], eye[2], p.yaw, p.pitch, this.curFovSmooth);
     Renderer.drawChunks(w, this.renderDist);
     drawEntities(w, this, dt);
-    this.drawRemotePlayer(w);
-    // remote player's mining progress (cracks on the block they're breaking)
-    const rp = this.remote;
-    if (rp && rp.mine && this.state === 'play') {
-      Renderer.drawCrack(rp.mine[0], rp.mine[1], rp.mine[2], clamp(rp.mine[3], 0, 9), w);
+    this.drawRemotePlayers(w);
+    // every other player's mining progress (cracks on the block they're breaking)
+    if (this.state === 'play') {
+      for (const rp of this.remotes.values()) {
+        if (rp.mine) Renderer.drawCrack(rp.mine[0], rp.mine[1], rp.mine[2], clamp(rp.mine[3], 0, 9), w);
+      }
     }
     // block selection + crack
     if (this.state === 'play' && UI.screen === 'none') {
