@@ -18,7 +18,6 @@
 <canvas id="gl"></canvas>
 <canvas id="ui"></canvas>
 <script>
-/* ==== js/core.js ==== */
 'use strict';
 // ============ core.js — math, RNG, noise ============
 
@@ -286,7 +285,6 @@ function fmtCoord(n) { return (Math.round(n * 1000) / 1000).toFixed(3); }
 
 </script>
 <script>
-/* ==== js/font.js ==== */
 'use strict';
 // ============ font.js — Minecraft-style bitmap font ============
 // Each glyph: array of column bitmasks; bit 0 = top row, rows 0-6 body, row 7 descender.
@@ -390,7 +388,6 @@ const Font = {
 
 </script>
 <script>
-/* ==== js/blocks.js ==== */
 'use strict';
 // ============ blocks.js — block registry ============
 
@@ -592,7 +589,6 @@ function blockCanHarvest(id, heldItem) {
 
 </script>
 <script>
-/* ==== js/items.js ==== */
 'use strict';
 // ============ items.js — items, recipes, smelting, fuel ============
 
@@ -851,7 +847,6 @@ function stackMax(s) { return Items[s.id] ? Items[s.id].stack : 64; }
 
 </script>
 <script>
-/* ==== js/textures.js ==== */
 'use strict';
 // ============ textures.js — procedural texture atlas ============
 // Atlas: 512x512 = 32x32 tiles of 16px. All art generated with seeded RNG for consistency.
@@ -2508,7 +2503,6 @@ function buildIcons() {
 
 </script>
 <script>
-/* ==== js/worldgen.js ==== */
 'use strict';
 // ============ worldgen.js — terrain, biomes, structures for all 3 dimensions ============
 
@@ -3355,7 +3349,6 @@ const Gen = {
 
 </script>
 <script>
-/* ==== js/world.js ==== */
 'use strict';
 // ============ world.js — chunks, lighting, fluids, ticking ============
 
@@ -4641,7 +4634,6 @@ function rayBox(ox, oy, oz, dx, dy, dz, b) {
 
 </script>
 <script>
-/* ==== js/mesher.js ==== */
 'use strict';
 // ============ mesher.js — chunk geometry with smooth lighting + AO ============
 
@@ -5236,7 +5228,6 @@ const Mesher = {
 
 </script>
 <script>
-/* ==== js/renderer.js ==== */
 'use strict';
 // ============ renderer.js — WebGL rendering ============
 
@@ -6038,7 +6029,6 @@ void main() {
 
 </script>
 <script>
-/* ==== js/particles.js ==== */
 'use strict';
 // ============ particles.js — billboard particle system ============
 
@@ -6204,7 +6194,6 @@ const Particles = {
 
 </script>
 <script>
-/* ==== js/weather.js ==== */
 'use strict';
 // ============ weather.js — rain, snow, thunderstorms + lightning ============
 // Only the overworld has weather. Rain falls as snow in cold biomes. Thunderstorms
@@ -6441,7 +6430,6 @@ const Weather = {
 
 </script>
 <script>
-/* ==== js/entities.js ==== */
 'use strict';
 // ============ entities.js — mobs, projectiles, items, dragon ============
 
@@ -7045,13 +7033,25 @@ class Arrow extends Entity {
       const r = rayBox(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, bb);
       if (r && r.t < step && r.t < hitT) { hitT = r.t; hitEnt = e2; }
     }
-    // player hit (hostile arrows)
+    // player hit (hostile arrows, or a guest-fired arrow hitting the host = PvP)
     const p = game && game.world === this.world ? game.player : null;
-    if (!this.fromPlayer && p && !p.deadFlag) {
+    if ((!this.fromPlayer || this.owner === 'guest') && p && !p.deadFlag) {
       const bb = [p.x - 0.4, p.y - 0.1, p.z - 0.4, p.x + 0.4, p.y + 1.9, p.z + 0.4];
       const r = rayBox(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, bb);
       if (r && r.t < step && r.t < hitT) {
         p.takeDamage(this.dmg, { x: this.x, y: this.y, z: this.z, knock: 0.6 });
+        Sfx.play('arrowHit', { pos: [this.x, this.y, this.z] });
+        this.remove();
+        return;
+      }
+    }
+    // multiplayer (host): arrows can strike the remote player, except the guest's own
+    if (game && game.mpRemoteHittable && game.mpRemoteHittable() && this.owner !== 'guest') {
+      const rt = game.remote;
+      const bb = [rt.dispX - 0.4, rt.dispY - 0.1, rt.dispZ - 0.4, rt.dispX + 0.4, rt.dispY + 1.9, rt.dispZ + 0.4];
+      const r = rayBox(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, bb);
+      if (r && r.t < step && r.t < hitT) {
+        game.mpSendPhit(this.dmg, this.x, this.z, this.crit);
         Sfx.play('arrowHit', { pos: [this.x, this.y, this.z] });
         this.remove();
         return;
@@ -7422,8 +7422,14 @@ class HostileMob extends Mob {
   // hostile mobs ignore the player entirely in creative mode
   targetPlayer(game) {
     if (game.mode === 'creative') return null;
-    const p = game.world === this.world ? game.player : null;
-    return p && !p.deadFlag ? p : null;
+    if (game.world !== this.world) return null;
+    const p = (game.player && !game.player.deadFlag) ? game.player : null;
+    // multiplayer (host): also consider the remote player, pick the nearer one
+    const rp = game.mpRemoteTarget ? game.mpRemoteTarget() : null;
+    if (p && rp) {
+      return Math.hypot(p.x - this.x, p.z - this.z) <= Math.hypot(rp.x - this.x, rp.z - this.z) ? p : rp;
+    }
+    return p || rp;
   }
   chasePlayer(dt, game, speedMul = 1) {
     const p = this.targetPlayer(game);
@@ -8196,6 +8202,12 @@ const MOB_CLASSES = {
   end_crystal: EndCrystal, dragon: EnderDragon,
 };
 function spawnMob(world, type, x, y, z) {
+  // multiplayer: the guest never simulates mobs — it asks the host to spawn one
+  // (e.g. a spawn egg) and renders the host's authoritative copy as a puppet.
+  if (typeof Game !== 'undefined' && Game.isGuest && Net.connected) {
+    Game.mpSpawnRequest('mob', { mt: type, x, y, z });
+    return null;
+  }
   const C = MOB_CLASSES[type];
   if (!C) return null;
   const e = new C(world, x, y, z);
@@ -8229,6 +8241,11 @@ function spawnFallingBlock(world, x, y, z, id, data) {
   world.entities.push(new FallingBlock(world, x, y, z, id, data));
 }
 function spawnPrimedTNT(world, x, y, z, fuse) {
+  // host-authority: guest routes ignition to the host so the blast is authoritative.
+  if (typeof Game !== 'undefined' && Game.isGuest && Net.connected) {
+    Game.mpSpawnRequest('tnt', { x, y, z, fuse });
+    return { dead: false, remove() {} };
+  }
   const e = new PrimedTNT(world, x, y, z, fuse);
   world.entities.push(e);
   Sfx.play('fuse', { pos: [x, y, z] });
@@ -8239,6 +8256,8 @@ function spawnPrimedTNT(world, x, y, z, fuse) {
 const NaturalSpawner = {
   t: 0,
   update(world, game, dt) {
+    // guest doesn't spawn/despawn mobs — the host streams them all (phase 4c).
+    if (game.isGuest && Net.connected) return;
     this.t -= dt;
     if (this.t > 0) return;
     this.t = 1.5;
@@ -8316,6 +8335,7 @@ const NaturalSpawner = {
 function updateEntities(world, dt, game) {
   // flush pending spawns from generation
   if (world.pendingSpawns.length) {
+    if (game.isGuest && Net.connected) { world.pendingSpawns.length = 0; } else
     for (const s of world.pendingSpawns) {
       if (s.type === 'dragon' || s.type === 'end_crystal') {
         if (game.dragonKilled && s.type === 'end_crystal') continue;
@@ -8332,8 +8352,20 @@ function updateEntities(world, dt, game) {
     // host-streamed target position and spin, so drawEntities renders them nicely.
     if (e.puppet) {
       e.age += dt;
+      const ox = e.x, oz = e.z;
       const k = Math.min(1, dt * 12);
       e.x += (e.tx - e.x) * k; e.y += (e.ty - e.y) * k; e.z += (e.tz - e.z) * k;
+      // mob puppets: decay hurt flash, drive the death animation, follow orientation
+      if (e.hurtT > 0) e.hurtT -= dt;
+      if (e.puppetDying) e.deathT = (e.deathT || 0.001) + dt;
+      if (e.tyaw != null) { e.yaw = e.tyaw; e.headYaw = e.thyaw != null ? e.thyaw : e.tyaw; }
+      if (e.thpitch != null) e.headPitch = lerp(e.headPitch || 0, e.thpitch, k);
+      // projectile puppets: orient from the host-streamed velocity
+      if (e.tvx != null) { e.vx = e.tvx; e.vy = e.tvy; e.vz = e.tvz; e.yaw = Math.atan2(-e.vx, -e.vz); }
+      // derive a walk cycle from actual displacement (mobs) — no physics needed
+      const moved = Math.hypot(e.x - ox, e.z - oz);
+      e.walkAmp = lerp(e.walkAmp || 0, clamp(moved / Math.max(dt, 0.001) / 3, 0, 1), dt * 8);
+      e.walkT += moved * 3.2;
       continue;
     }
     // skip far entities
@@ -8442,7 +8474,6 @@ function drawEntities(world, game, dt) {
 
 </script>
 <script>
-/* ==== js/player.js ==== */
 'use strict';
 // ============ player.js — movement, mining, interaction, survival stats ============
 
@@ -9029,6 +9060,12 @@ class Player {
       let dmg = held && Items[held.id] && Items[held.id].dmg ? Items[held.id].dmg : 1;
       let crit = false;
       if (!this.onGround && this.vy < 0 && !this.sprinting) { dmg = Math.round(dmg * 1.5); crit = true; }
+      // multiplayer: a puppet mob belongs to the host — ask them to apply the damage
+      if (target.puppet && this.game.mpSendMobHit) {
+        this.game.mpSendMobHit(target.nid, dmg, this.x, this.z);
+        Sfx.play('attackHit');
+        return;
+      }
       // deflect fireballs
       if (target.type === 'ghast_fireball') {
         target.vx = dir[0] * 20; target.vy = dir[1] * 20; target.vz = dir[2] * 20;
@@ -9046,6 +9083,8 @@ class Player {
       }
       return;
     }
+    // multiplayer PvP: no mob in the way → try to hit the other player
+    if (this.game.mpTryHitRemote) this.game.mpTryHitRemote(dir, this);
   }
   pickEntity(range) {
     const dir = this.lookDir();
@@ -9518,7 +9557,13 @@ class Player {
     const power = Math.min(1, charge);
     const crit = power >= 1 && Math.random() < 0.35;
     const dmg = Math.max(1, Math.round(2 + power * 6 + (crit ? 2 : 0)));
-    this.world.entities.push(new Arrow(this.world, this.x + dir[0] * 0.4, this.eyeY() - 0.1, this.z + dir[2] * 0.4, dir[0], dir[1], dir[2], 14 + power * 32, dmg, true));
+    const ax = this.x + dir[0] * 0.4, ay = this.eyeY() - 0.1, az = this.z + dir[2] * 0.4;
+    if (this.game.isGuest && Net.connected) {
+      // host-authority: the host owns the flying arrow (marked 'guest' so it can hit the host, not us)
+      this.game.mpSpawnRequest('arrow', { x: ax, y: ay, z: az, dx: dir[0], dy: dir[1], dz: dir[2], sp: 14 + power * 32, dmg });
+    } else {
+      this.world.entities.push(new Arrow(this.world, ax, ay, az, dir[0], dir[1], dir[2], 14 + power * 32, dmg, true));
+    }
     Sfx.play('bowShoot', { pitch: 0.85 + power * 0.4 });
     const held = this.heldItem();
     if (!creative && held && held.dur !== undefined) {
@@ -9545,7 +9590,6 @@ class Player {
 
 </script>
 <script>
-/* ==== js/sound.js ==== */
 'use strict';
 // ============ sound.js — WebAudio synth SFX + music ============
 
@@ -9901,7 +9945,6 @@ const Music = {
 
 </script>
 <script>
-/* ==== js/ui.js ==== */
 'use strict';
 // ============ ui.js — HUD + all screens (2D canvas overlay) ============
 
@@ -10368,6 +10411,7 @@ const UI = {
     if (game.state === 'win') return this.drawCredits(game, dt);
     if (game.state === 'play' || game.state === 'dead') {
       this.drawOverlays(game);
+      if (game.remote && game.remoteName) this.drawRemoteNametag(game);
       if (this.screen === 'none' && game.state === 'play') this.drawHUD(game, dt);
       if (game.showDebug) this.drawF3(game);
       this.drawMessages(dt);
@@ -10384,6 +10428,45 @@ const UI = {
     }
   },
 
+  // ---------- world-space nametag over the remote player ----------
+  // Vanilla feel: normally readable THROUGH blocks; while the remote is sneaking it
+  // only shows with a clear line of sight and at reduced opacity (harder to spot).
+  drawRemoteNametag(game) {
+    const r = game.remote, R = Renderer;
+    if (!r || !R.projView) return;
+    const hx = r.dispX, hy = r.dispY + 2.15, hz = r.dispZ; // just above the 1.8-tall model
+    const dx = hx - R.camX, dy = hy - R.camY, dz = hz - R.camZ;
+    const dist = Math.hypot(dx, dy, dz);
+    const maxDist = r.sn ? 8 : 48;                 // sneaking → only visible up close
+    if (dist > maxDist || dist < 0.001) return;
+    let alpha = 1;
+    if (r.sn) {
+      // occluded by blocks → hidden; otherwise faded
+      if (game.world.raycast(R.camX, R.camY, R.camZ, dx / dist, dy / dist, dz / dist, dist - 0.4)) return;
+      alpha = 0.35;
+    }
+    // project head to normalized device coords via proj*view
+    const m = R.projView;
+    const cx = m[0] * hx + m[4] * hy + m[8] * hz + m[12];
+    const cy = m[1] * hx + m[5] * hy + m[9] * hz + m[13];
+    const cw = m[3] * hx + m[7] * hy + m[11] * hz + m[15];
+    if (cw <= 0.0001) return;                       // behind the camera
+    const ndcX = cx / cw, ndcY = cy / cw;
+    if (ndcX < -1.2 || ndcX > 1.2 || ndcY < -1.2 || ndcY > 1.2) return;
+    // NDC → screen fraction → UI virtual coords (both canvases cover the same rect)
+    const W = this.W(), H = this.H();
+    const vx = (ndcX * 0.5 + 0.5) * W;
+    const vy = (1 - (ndcY * 0.5 + 0.5)) * H;
+    const name = game.remoteName;
+    const tw = Font.width(name);
+    const px = Math.round(vx - tw / 2 - 2), py = Math.round(vy - 5);
+    const oldA = this.ctx.globalAlpha;
+    this.ctx.globalAlpha = alpha * 0.4;
+    this.rect(px, py, tw + 4, 10, '#000000');
+    this.ctx.globalAlpha = alpha;
+    this.textC(name, vx, py + 1, '#ffffff', false);
+    this.ctx.globalAlpha = oldA;
+  },
   // ---------- HUD ----------
   drawOverlays(game) {
     const p = game.player;
@@ -10863,10 +10946,21 @@ const UI = {
       return;
     }
 
-    this.textC('Ask your friend to host, then enter their code', W / 2, H * 0.20, '#c0c0c0');
+    this.textC('Ask your friend to host, then enter their code', W / 2, H * 0.18, '#c0c0c0');
+    // your-name field (shown above your head to the other player)
+    this.text('Your Name', bx, H * 0.24, '#a0a0a0');
+    const ny = H * 0.24 + 10;
+    this.rect(bx, ny, 200, 20, '#000000');
+    const nfoc = this.mpFocus === 'name';
+    const nec = nfoc ? '#ffffff' : '#707070';
+    this.rect(bx, ny, 200, 1, nec); this.rect(bx, ny + 19, 200, 1, nec);
+    this.rect(bx, ny, 1, 20, nec); this.rect(bx + 199, ny, 1, 20, nec);
+    const ncur = nfoc && ((performance.now() / 400) | 0) % 2 === 0 ? '_' : '';
+    this.textScaled((Game.mpName || '') + ncur, bx + 4, ny + 4, '#ffffff', 1.5);
+    this.buttons.push({ id: 'mp_focus_name', x: bx, y: ny, w: 200, h: 20 });
     // join code field
-    this.text('Join Code (6 digits)', bx, H * 0.34, '#a0a0a0');
-    const iy = H * 0.34 + 10;
+    this.text('Join Code (6 digits)', bx, H * 0.40, '#a0a0a0');
+    const iy = H * 0.40 + 10;
     this.rect(bx, iy, 200, 20, '#000000');
     const focused = this.mpFocus === 'code';
     const ec = focused ? '#ffffff' : '#707070';
@@ -10875,7 +10969,7 @@ const UI = {
     const cursor = focused && ((performance.now() / 400) | 0) % 2 === 0 ? '_' : '';
     this.textScaled((this.mpCode || '') + cursor, bx + 4, iy + 4, '#ffffff', 1.5);
     this.buttons.push({ id: 'mp_focus_code', x: bx, y: iy, w: 200, h: 20 });
-    this.button('mp_join', bx, H * 0.34 + 36, 200, 'Join Game');
+    this.button('mp_join', bx, H * 0.40 + 36, 200, 'Join Game');
 
     if (status === 'connecting' || status === 'joining') this.textC('Connecting...', W / 2, H * 0.56, '#ffff55');
     if (N && N.errorMsg) this.textC(N.errorMsg, W / 2, H * 0.56, '#ff5555');
@@ -10998,7 +11092,6 @@ const HUD_ICONS = {
 
 </script>
 <script>
-/* ==== js/chat.js ==== */
 'use strict';
 // ============ chat.js — T chat, slash commands, tab-complete suggestions ============
 
@@ -11359,7 +11452,6 @@ const Chat = {
 
 </script>
 <script>
-/* ==== js/net.js ==== */
 'use strict';
 // ============ net.js — multiplayer client: talks to relay.js over WebSocket ============
 // Phase 1: connection + room pairing only. Game-state sync (player positions,
@@ -11470,7 +11562,6 @@ const Net = {
 
 </script>
 <script>
-/* ==== js/mobile.js ==== */
 'use strict';
 // ============ mobile.js — touch controls (Minecraft PE style) ============
 // Adds an on-screen joystick + look-drag + fully repositionable buttons so the
@@ -11851,7 +11942,8 @@ const Mobile = {
     else if (target === 'name') el.value = UI.nameInput || '';
     else if (target === 'seed') el.value = UI.seedInput || '';
     else if (target === 'mpcode') el.value = UI.mpCode || '';
-    el.maxLength = target === 'chat' ? 100 : (target === 'mpcode' ? 6 : 24);
+    else if (target === 'mpname') el.value = Game.mpName || '';
+    el.maxLength = target === 'chat' ? 100 : (target === 'mpcode' ? 6 : (target === 'mpname' ? 16 : 24));
     el.inputMode = target === 'mpcode' ? 'numeric' : 'text';
     el.setAttribute('enterkeyhint', target === 'chat' ? 'send' : (target === 'mpcode' ? 'go' : 'done'));
     // focus must run inside the same user gesture for iOS to raise the keyboard
@@ -11864,12 +11956,14 @@ const Mobile = {
     else if (this.kbTarget === 'name') { UI.nameInput = v.slice(0, 24); }
     else if (this.kbTarget === 'seed') { UI.seedInput = v.slice(0, 24); }
     else if (this.kbTarget === 'mpcode') { UI.mpCode = v.replace(/[^0-9]/g, '').slice(0, 6); }
+    else if (this.kbTarget === 'mpname') { Game.mpName = v.slice(0, 16); Game.mpSaveName(); }
   },
   onKbKeydown(e) {
     if (e.key === 'Enter') {
       e.preventDefault();
       if (this.kbTarget === 'chat') { Chat.submit(); this.closeKeyboard(); }
       else if (this.kbTarget === 'mpcode') { this.closeKeyboard(); this.game.onButton('mp_join'); }
+      else if (this.kbTarget === 'mpname') { this.closeKeyboard(); UI.mpFocus = 'code'; }
       else { this.closeKeyboard(); this.game.onButton('create_go'); }
     }
   },
@@ -12055,7 +12149,6 @@ const Mobile = {
 
 </script>
 <script>
-/* ==== js/main.js ==== */
 'use strict';
 // ============ main.js — game orchestration ============
 
@@ -12089,6 +12182,7 @@ const Game = {
   // multiplayer (see js/net.js). mpRole: null|'host'|'guest'. remote = the other player.
   mpRole: null, isGuest: false, remote: null, mpPosTimer: 0, mpCapturing: null,
   mpDropSeq: 0, mpDropTimer: 0,
+  mpEntSeq: 0, mpEntTimer: 0, _remoteProxy: null, mpName: '', remoteName: '',
   loadQueue: null,
   pendingSave: null,
   // first-person bare-arm pose (live-tweakable via MC.game.armPose.* for tuning)
@@ -12211,8 +12305,8 @@ const Game = {
     if (this._netInit) return;
     this._netInit = true;
     // a guest joined our hosted world → send them the whole world so they generate it
-    Net.on('guest_joined', () => { if (this.mpRole === 'host' && this.player) { this.mpSendWorld(); UI.msg('A player joined!'); } });
-    Net.on('guest_left', () => { this.remote = null; if (this.mpRole === 'host') UI.msg('The other player left'); });
+    Net.on('guest_joined', () => { if (this.mpRole === 'host' && this.player) { this.mpSendWorld(); this.mpSendHello(); UI.msg('A player joined!'); } });
+    Net.on('guest_left', () => { this.remote = null; this.remoteName = ''; if (this.mpRole === 'host') UI.msg('The other player left'); });
     Net.on('world', (m) => this.mpJoinWorld(m));
     Net.on('pos', (m) => this.onRemotePos(m));
     Net.on('blocks', (m) => this.onRemoteBlocks(m));
@@ -12220,6 +12314,11 @@ const Game = {
     Net.on('dropReq', (m) => this.onRemoteDropReq(m)); // host: guest asked us to spawn a drop
     Net.on('drops', (m) => this.onRemoteDrops(m));      // guest: host's authoritative drop list
     Net.on('give', (m) => this.onRemoteGive(m));        // guest: host handed us a picked-up stack
+    Net.on('ents', (m) => this.onRemoteEnts(m));        // guest: host's authoritative mob/projectile snapshot
+    Net.on('spawnReq', (m) => this.onRemoteSpawnReq(m));// host: guest asked us to spawn a mob/tnt/arrow
+    Net.on('mhit', (m) => this.onRemoteMobHit(m));      // host: guest hit one of our mobs
+    Net.on('phit', (m) => this.onRemotePhit(m));        // either side: the other player hit me
+    Net.on('hello', (m) => { this.remoteName = (m.name || '').slice(0, 16) || 'Player'; }); // display name exchange
     Net.on('closed', () => {
       this.remote = null;
       if (this.isGuest) { UI.msg('Disconnected from host', '#ff5555'); }
@@ -12247,9 +12346,19 @@ const Game = {
       },
     });
   },
+  // ---- display name (phase 4d) ----
+  mpMyName() {
+    if (this.mpName == null || this.mpName === '') {
+      try { this.mpName = localStorage.getItem('mcpe_name') || ''; } catch (e) {}
+    }
+    return (this.mpName || 'Player').slice(0, 16);
+  },
+  mpSaveName() { try { localStorage.setItem('mcpe_name', this.mpName || ''); } catch (e) {} },
+  mpSendHello() { if (Net.connected) Net.send('hello', { name: this.mpMyName() }); },
   mpJoinWorld(m) {
     // guest side: build the host's world from the payload, spawn beside the host
     this.isGuest = true; this.mpRole = 'guest';
+    this.mpSendHello();
     this.currentWorldId = 0;
     const hp = m.hostPos || { x: 8, y: 70, z: 8 };
     const save = {
@@ -12270,12 +12379,13 @@ const Game = {
     if (!this.remote) {
       this.remote = { tx: m.x, ty: m.y, tz: m.z, dispX: m.x, dispY: m.y, dispZ: m.z,
         yaw: m.yaw || 0, pitch: m.pitch || 0, walkT: 0, walkAmp: 0, age: 0, swing: 1,
-        held: m.held != null ? m.held : null, mine: m.mine || null };
+        held: m.held != null ? m.held : null, mine: m.mine || null, sn: m.sn ? 1 : 0 };
     } else {
       const r = this.remote;
       r.tx = m.x; r.ty = m.y; r.tz = m.z; r.yaw = m.yaw || 0; r.pitch = m.pitch || 0;
       r.held = m.held != null ? m.held : null;
       r.mine = m.mine || null;
+      r.sn = m.sn ? 1 : 0;
     }
   },
   updateRemote(dt) {
@@ -12350,9 +12460,10 @@ const Game = {
   onRemoteDrops(m) {
     if (this.mpRole === 'host' || !this.world || !m.list) return;
     const w = this.world, seen = new Set();
-    // index existing puppets by nid
+    // index existing item puppets by nid (mob/projectile puppets have their own nid
+    // space on the 'ents' channel, so only reconcile the ones carrying a stack)
     const byNid = new Map();
-    for (const e of w.entities) if (e.puppet && e.nid != null) byNid.set(e.nid, e);
+    for (const e of w.entities) if (e.puppet && e.stack && e.nid != null) byNid.set(e.nid, e);
     for (const row of m.list) {
       const nid = row[0], id = row[1], n = row[2], x = row[3], y = row[4], z = row[5];
       seen.add(nid);
@@ -12367,7 +12478,162 @@ const Game = {
       }
     }
     // drop puppets the host no longer reports (picked up / despawned)
-    for (const e of w.entities) if (e.puppet && !seen.has(e.nid)) e.remove();
+    for (const e of w.entities) if (e.puppet && e.stack && !seen.has(e.nid)) e.remove();
+  },
+  // ---- mob & projectile sync (phase 4c, host-authoritative) ----
+  // Entity types the host streams to the guest (drops have their own channel;
+  // rideables and the dragon fight aren't synced yet).
+  mpIsSyncedEnt(e) {
+    if (e.puppet || e.dead) return false;
+    const t = e.type;
+    if (t === 'dragon' || t === 'end_crystal') return false;
+    return !!(MOB_MODELS[t] || t === 'arrow' || t === 'xp' || t === 'tnt' ||
+      t === 'falling_block' || t === 'pearl' || t === 'eye' ||
+      t === 'blaze_fireball' || t === 'ghast_fireball');
+  },
+  mpBroadcastEnts(dt) {
+    if (this.mpRole !== 'host' || !Net.connected || !this.world) return;
+    this.mpEntTimer += dt;
+    if (this.mpEntTimer < 0.1) return; // ~10 Hz
+    this.mpEntTimer = 0;
+    const w = this.world, list = [];
+    for (const e of w.entities) {
+      if (!this.mpIsSyncedEnt(e)) continue;
+      if (e.nid == null) e.nid = ++this.mpEntSeq;
+      let f = 0;
+      if (e.hurtT > 0.15) f |= 1;
+      if (e.deathT > 0) f |= 2;
+      if (e.onGround) f |= 4;
+      const row = {
+        n: e.nid, t: e.type,
+        x: +e.x.toFixed(2), y: +e.y.toFixed(2), z: +e.z.toFixed(2),
+        r: +(e.yaw || 0).toFixed(2), hy: +(e.headYaw || 0).toFixed(2), hp: +(e.headPitch || 0).toFixed(2),
+        f,
+      };
+      if (e.hp != null && MOB_MODELS[e.type]) { row.h = e.hp; row.mx = e.maxHp; }
+      if (e.type === 'creeper') row.fu = +(e.fuseT || 0).toFixed(2);
+      else if (e.type === 'tnt') row.fu = +(e.fuse || 0).toFixed(2);
+      if (e.type === 'falling_block') { row.b = e.blockId; row.bd = e.data; }
+      if (e.type === 'blaze_fireball' || e.type === 'ghast_fireball') row.g = e.big ? 1 : 0;
+      if (e.type === 'arrow' || e.type === 'pearl' || e.type === 'eye' ||
+          e.type === 'blaze_fireball' || e.type === 'ghast_fireball') {
+        row.vx = +e.vx.toFixed(2); row.vy = +e.vy.toFixed(2); row.vz = +e.vz.toFixed(2);
+      }
+      list.push(row);
+    }
+    Net.send('ents', { list });
+  },
+  // Guest: reconcile our puppet mobs/projectiles with the host's snapshot.
+  onRemoteEnts(m) {
+    if (this.mpRole === 'host' || !this.world || !m.list) return;
+    const w = this.world, seen = new Set();
+    const byNid = new Map();
+    for (const e of w.entities) if (e.puppet && !e.stack && e.nid != null) byNid.set(e.nid, e);
+    for (const row of m.list) {
+      seen.add(row.n);
+      let e = byNid.get(row.n);
+      if (!e) { e = this.mpMakePuppet(row); if (!e) continue; w.entities.push(e); }
+      e.tx = row.x; e.ty = row.y; e.tz = row.z;
+      e.tyaw = row.r; e.thyaw = row.hy; e.thpitch = row.hp;
+      e.hurtT = (row.f & 1) ? Math.max(e.hurtT || 0, 0.4) : (e.hurtT || 0);
+      e.puppetDying = !!(row.f & 2);
+      e.onGround = !!(row.f & 4);
+      if (row.h != null) { e.hp = row.h; e.maxHp = row.mx; }
+      if (row.fu != null) { if (e.type === 'creeper') e.fuseT = row.fu; else e.fuse = row.fu; }
+      if (row.vx != null) { e.tvx = row.vx; e.tvy = row.vy; e.tvz = row.vz; }
+      if (row.g != null) e.big = !!row.g;
+    }
+    for (const e of w.entities) if (e.puppet && !e.stack && !seen.has(e.nid)) e.remove();
+  },
+  mpMakePuppet(row) {
+    const w = this.world; let e;
+    if (MOB_MODELS[row.t] && MOB_CLASSES[row.t]) {
+      e = new MOB_CLASSES[row.t](w, row.x, row.y, row.z);
+    } else {
+      e = new Entity(w, row.x, row.y, row.z); // generic shell for projectiles
+      e.type = row.t;
+      if (row.t === 'falling_block') { e.blockId = row.b; e.data = row.bd; }
+    }
+    e.puppet = true; e.nid = row.n; e.noClip = true; e.gravity = 0;
+    e.tx = row.x; e.ty = row.y; e.tz = row.z;
+    e.yaw = row.r || 0; e.headYaw = row.hy || 0; e.headPitch = row.hp || 0;
+    return e;
+  },
+  // Host: guest asked us to spawn something (host-authority for guest actions).
+  onRemoteSpawnReq(m) {
+    if (this.mpRole !== 'host' || !this.world) return;
+    const w = this.world;
+    if (m.k === 'mob') spawnMob(w, m.mt, m.x, m.y, m.z);
+    else if (m.k === 'tnt') spawnPrimedTNT(w, m.x, m.y, m.z, m.fuse || 80);
+    else if (m.k === 'arrow') w.entities.push(new Arrow(w, m.x, m.y, m.z, m.dx, m.dy, m.dz, m.sp, m.dmg, true, 'guest'));
+  },
+  // Host: guest melee-hit one of our mobs → apply the damage authoritatively.
+  onRemoteMobHit(m) {
+    if (this.mpRole !== 'host' || !this.world) return;
+    for (const e of this.world.entities) {
+      if (e.nid === m.n && !e.dead && !e.puppet && MOB_MODELS[e.type]) {
+        e.takeDamage(m.d || 1, { x: m.x, y: e.y, z: m.z, knock: 0.9, byPlayer: true });
+        break;
+      }
+    }
+  },
+  // Guest: ask the host to spawn a host-authoritative entity on our behalf.
+  mpSpawnRequest(kind, data) {
+    if (!Net.connected) return;
+    Net.send('spawnReq', Object.assign({ k: kind }, data));
+  },
+  // Guest: tell the host we melee-hit one of their mobs.
+  mpSendMobHit(nid, dmg, srcX, srcZ) {
+    if (!Net.connected || nid == null) return;
+    Net.send('mhit', { n: nid, d: dmg, x: +srcX.toFixed(2), z: +srcZ.toFixed(2) });
+  },
+  // ---- player-vs-player / mob-vs-remote damage ----
+  mpRemoteHittable() { return this.mpRole === 'host' && !!this.remote && this.state === 'play'; },
+  // Send "you got hit" to the other player (they apply it to their own local body).
+  mpSendPhit(dmg, srcX, srcZ, crit) {
+    if (!Net.connected) return;
+    Net.send('phit', { d: dmg, x: +srcX.toFixed(2), z: +srcZ.toFixed(2), c: crit ? 1 : 0 });
+  },
+  onRemotePhit(m) {
+    const p = this.player;
+    if (!p || p.deadFlag || this.state !== 'play') return;
+    p.takeDamage(m.d || 1, { x: m.x, y: p.y, z: m.z, knock: 0.9 });
+    if (m.c) Particles.burst('crit', p.x, p.y + 1, p.z, 8);
+  },
+  // A proxy for the remote player so host mob AI can target & damage the guest.
+  mpRemoteTarget() {
+    if (this.mpRole !== 'host' || !this.remote || this.state !== 'play') return null;
+    const r = this.remote, game = this;
+    if (!this._remoteProxy) {
+      this._remoteProxy = {
+        deadFlag: false,
+        takeDamage(dmg, src) { game.mpSendPhit(dmg, src ? src.x : this.x, src ? src.z : this.z, false); },
+        lookDir() {
+          const cp = Math.cos(this.pitch || 0);
+          return [Math.sin(this.yaw || 0) * cp, -Math.sin(this.pitch || 0), -Math.cos(this.yaw || 0) * cp];
+        },
+      };
+    }
+    const px = this._remoteProxy;
+    px.x = r.dispX; px.y = r.dispY; px.z = r.dispZ; px.yaw = r.yaw; px.pitch = r.pitch;
+    return px;
+  },
+  // Try to melee the other player (called from player.attackPress when no mob was hit).
+  mpTryHitRemote(dir, p) {
+    if (!Net.connected || !this.remote) return false;
+    const r = this.remote;
+    const eye = p.eyePos();
+    const bb = [r.dispX - 0.4, r.dispY - 0.1, r.dispZ - 0.4, r.dispX + 0.4, r.dispY + 1.9, r.dispZ + 0.4];
+    const hit = rayBox(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], bb);
+    if (!hit || hit.t > 3.2) return false;
+    if (this.world.raycast(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], hit.t)) return false; // block in the way
+    const held = p.heldItem();
+    let dmg = held && Items[held.id] && Items[held.id].dmg ? Items[held.id].dmg : 1;
+    let crit = false;
+    if (!p.onGround && p.vy < 0 && !p.sprinting) { dmg = Math.round(dmg * 1.5); crit = true; }
+    this.mpSendPhit(dmg, p.x, p.z, crit);
+    Sfx.play(crit ? 'attackCrit' : 'attackHit');
+    return true;
   },
   // fire a lightweight 'swing' action to the other player whenever we swing our arm
   // (mining/placing/hitting). Throttled so rapid swings don't flood the relay.
@@ -12391,7 +12657,7 @@ const Game = {
     Net.send('pos', {
       x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
       yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3),
-      held: held ? held.id : null, mine,
+      held: held ? held.id : null, mine, sn: p.sneaking ? 1 : 0,
     });
   },
   onKey(e, down) {
@@ -12415,10 +12681,19 @@ const Game = {
       return;
     }
     if (this.state === 'mp' && down) {
-      if (code === 'Backspace') UI.mpCode = (UI.mpCode || '').slice(0, -1);
-      else if (code === 'Enter') this.onButton('mp_join');
-      else if (code === 'Escape') this.onButton('mp_back');
-      else if (/^[0-9]$/.test(e.key) && (UI.mpCode || '').length < 6) UI.mpCode = (UI.mpCode || '') + e.key;
+      if (UI.mpFocus === 'name') {
+        if (code === 'Backspace') this.mpName = (this.mpName || '').slice(0, -1);
+        else if (code === 'Enter' || code === 'Tab') UI.mpFocus = 'code';
+        else if (code === 'Escape') this.onButton('mp_back');
+        else if (/^[\x20-\x7e]$/.test(e.key) && (this.mpName || '').length < 16) this.mpName = (this.mpName || '') + e.key;
+        this.mpSaveName();
+      } else {
+        if (code === 'Backspace') UI.mpCode = (UI.mpCode || '').slice(0, -1);
+        else if (code === 'Enter') this.onButton('mp_join');
+        else if (code === 'Escape') this.onButton('mp_back');
+        else if (code === 'Tab') UI.mpFocus = 'name';
+        else if (/^[0-9]$/.test(e.key) && (UI.mpCode || '').length < 6) UI.mpCode = (UI.mpCode || '') + e.key;
+      }
       e.preventDefault();
       return;
     }
@@ -12496,12 +12771,13 @@ const Game = {
     }
     switch (id) {
       case 'single': this.state = 'worlds'; UI.selectedWorld = null; break;
-      case 'multiplayer_menu': this.state = 'mp'; UI.mpCode = ''; UI.mpFocus = 'code'; this.mpRole = null; this.isGuest = false; Net.disconnect(); this.initNet(); break;
+      case 'multiplayer_menu': this.state = 'mp'; UI.mpCode = ''; UI.mpFocus = 'name'; this.mpMyName(); this.mpRole = null; this.isGuest = false; Net.disconnect(); this.initNet(); break;
       case 'mp_join':
         if ((UI.mpCode || '').length === 6) { this.initNet(); Net.join(Net.defaultRelayUrl(), UI.mpCode); }
         else Net.errorMsg = 'Enter a 6-digit code';
         break;
       case 'mp_focus_code': UI.mpFocus = 'code'; if (Mobile.enabled) Mobile.openKeyboard('mpcode'); break;
+      case 'mp_focus_name': UI.mpFocus = 'name'; if (Mobile.enabled) Mobile.openKeyboard('mpname'); break;
       case 'mp_cancel': Net.disconnect(); this.state = 'mp'; UI.mpCode = ''; break;
       case 'mp_back': Net.disconnect(); this.state = 'title'; break;
       // hosting the currently-loaded world, from the pause menu
@@ -13042,6 +13318,7 @@ const Game = {
       this.updateRemote(dt);
       this.sendMyPos(dt);
       this.mpBroadcastDrops(dt);
+      this.mpBroadcastEnts(dt);
       Particles.update(dt, w);
       Weather.update(dt, this);
       // dragon boss bar
