@@ -4,7 +4,7 @@ A project made as recreation of Minecraft (roughly the 1.8-era look and feel), b
 
 **Play it here:** https://astrome0.github.io/minecraft-html/
 
-This is an unofficial fan project, not affiliated with or endorsed by Mojang/Microsoft.
+This is an project for fun, because im bored :D, not affiliated with or endorsed by Mojang/Microsoft.
 
 ## What's in the game
 
