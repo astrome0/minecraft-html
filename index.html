@@ -8299,6 +8299,45 @@ function spawnPrimedTNT(world, x, y, z, fuse) {
   return e;
 }
 
+// ---------- save / load ----------
+// Mobs, boats/minecarts and dropped items are part of the world and survive a
+// reload; projectiles, XP orbs, primed TNT and falling blocks are short-lived
+// mid-flight state and are deliberately dropped.
+const MAX_SAVED_ENTITIES = 400;
+function serializeEntity(e) {
+  if (!e || e.dead || e.puppet || e.deathT > 0) return null;
+  const r2 = (v) => +v.toFixed(2);
+  const base = { t: e.type, x: r2(e.x), y: r2(e.y), z: r2(e.z), yaw: r2(e.yaw) };
+  if (e.type === 'item') return e.stack ? Object.assign(base, { s: e.stack }) : null;
+  if (e.type === 'boat' || e.type === 'minecart') return base;
+  if (MOB_CLASSES[e.type]) return Object.assign(base, { hp: r2(e.hp) });
+  return null;
+}
+function saveEntities(world) {
+  const out = [];
+  for (const e of world.entities) {
+    const o = serializeEntity(e);
+    if (o) out.push(o);
+    if (out.length >= MAX_SAVED_ENTITIES) break;
+  }
+  return out;
+}
+function loadEntities(world, list) {
+  if (!Array.isArray(list)) return;
+  for (const o of list) {
+    if (!o || typeof o.x !== 'number') continue;
+    let e = null;
+    if (o.t === 'item') { if (!o.s || !o.s.id) continue; e = new ItemEntity(world, o.x, o.y, o.z, o.s, false); e.pickupDelay = 0; }
+    else if (o.t === 'boat') e = new Boat(world, o.x, o.y, o.z);
+    else if (o.t === 'minecart') e = new Minecart(world, o.x, o.y, o.z);
+    else if (MOB_CLASSES[o.t]) e = new MOB_CLASSES[o.t](world, o.x, o.y, o.z);
+    if (!e) continue;
+    if (typeof o.yaw === 'number') { e.yaw = o.yaw; e.headYaw = o.yaw; }
+    if (typeof o.hp === 'number' && o.hp > 0) e.hp = Math.min(o.hp, e.maxHp);
+    world.entities.push(e);
+  }
+}
+
 // ---------- natural spawning ----------
 const NaturalSpawner = {
   t: 0,
@@ -8415,6 +8454,10 @@ function updateEntities(world, dt, game) {
       e.walkT += moved * 3.2;
       continue;
     }
+    // Never simulate an entity whose chunk isn't generated: getBlock reports AIR for
+    // unloaded chunks, so it would fall out of the world and delete itself. Matters
+    // for mobs restored from a save that sit outside the initial load radius.
+    if (!world.isLoaded(floor(e.x), floor(e.z))) continue;
     // skip far entities
     const d = Math.hypot(e.x - p.x, e.z - p.z);
     if (d > 140) { if (e.type === 'item' || e.type === 'xp') continue; }
@@ -11103,6 +11146,8 @@ const UI = {
     const tOn = typeof Mobile !== 'undefined' && Mobile.enabled;
     this.button('touch_toggle', bx, H * 0.25 + 80, 150, 'Touch Controls: ' + (tOn ? 'ON' : 'OFF'));
     if (tOn) this.button('touch_edit', bx + 160, H * 0.25 + 80, 150, 'Edit Touch Layout...');
+    else if (typeof Mobile !== 'undefined' && Mobile.touchDevice)
+      this.textC('Off = keyboard/mouse mode. The pause button stays tappable.', W / 2, H * 0.25 + 104, '#c8c8c8');
     this.button('options_done', W / 2 - 100, H * 0.78, 200, 'Done');
   },
   drawControls(game) {
@@ -11748,6 +11793,9 @@ const Mobile = {
     try { const s = localStorage.getItem('mcpe_touch_on'); if (s != null) saved = s === '1'; } catch (e) {}
     const auto = (window.matchMedia && matchMedia('(pointer:coarse)').matches) ||
       ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    // a real finger-driven device: even with the touch controls switched off we must
+    // keep *some* touch routing alive, otherwise there is no way back into the menus
+    this.touchDevice = forced != null ? forced : auto;
     this.enabled = forced != null ? forced : (saved != null ? saved : auto);
 
     this.loadLayout();
@@ -11757,14 +11805,31 @@ const Mobile = {
     window.addEventListener('pointermove', (e) => this.onMove(e), { passive: false });
     window.addEventListener('pointerup', (e) => this.onUp(e), { passive: false });
     window.addEventListener('pointercancel', (e) => this.onUp(e), { passive: false });
+    // switching apps / rotating / hiding the soft keyboard must never leave a button
+    // held down or the chat stuck open — that used to require a page reload
+    // (window 'blur' only drops held buttons — on some Android browsers raising the
+    // soft keyboard blurs the window, and closing the chat there would be wrong)
+    window.addEventListener('blur', () => this.releaseAll());
+    window.addEventListener('pagehide', () => this.panic());
+    document.addEventListener('visibilitychange', () => { if (document.hidden) this.panic(); });
     const cv = document.getElementById('ui');
     if (cv) cv.style.touchAction = 'none';
+  },
+  // drop every held input and any open soft keyboard/chat (safe to call any time)
+  panic() {
+    this.releaseAll();
+    this.closeKeyboard();
+    this.closeChat();
   },
   setEnabled(on) {
     this.enabled = on;
     try { localStorage.setItem('mcpe_touch_on', on ? '1' : '0'); } catch (e) {}
-    if (!on) this.releaseAll();
+    if (!on) { this.releaseAll(); this.closeKeyboard(); }
   },
+  // touch controls are off, but this is a touch-only device: keep menus + a pause
+  // button tappable so the player can always get back to Settings and switch them
+  // back on (otherwise the toggle is a one-way trip that needs a page reload).
+  fallback() { return !this.enabled && this.touchDevice; },
 
   loadLayout() {
     this.layout = this.defaultLayout();
@@ -11802,7 +11867,7 @@ const Mobile = {
     return g && g.state === 'play' && UI.screen === 'none' && !(typeof Chat !== 'undefined' && Chat.open);
   },
   onDown(e) {
-    if (!this.enabled) return;
+    if (!this.enabled) { if (this.fallback()) this.fallbackDown(e); return; }
     if (typeof Sfx !== 'undefined') Sfx.ensure();
     const id = e.pointerId, x = e.clientX, y = e.clientY;
     if (UI.screen === 'touchedit') { e.preventDefault(); this.editorStart(id, x, y); return; }
@@ -11810,8 +11875,22 @@ const Mobile = {
     e.preventDefault();
     this.playStart(id, x, y);
   },
+  // touch controls off on a touch device: menus stay tappable and a lone pause
+  // button remains in play, so Settings (and the toggle) are always reachable.
+  fallbackDown(e) {
+    if (typeof Sfx !== 'undefined') Sfx.ensure();
+    const x = e.clientX, y = e.clientY;
+    if (!this.inPlay()) { e.preventDefault(); this.menuStart(e.pointerId, x, y); return; }
+    const c = this.cpos('pause');
+    if ((x - c.x) * (x - c.x) + (y - c.y) * (y - c.y) <= c.r * c.r) {
+      e.preventDefault();
+      UI.screen = 'pause';
+      if (typeof Sfx !== 'undefined') Sfx.play('click');
+    }
+    // anything else is left alone so the native mouse handlers can see it
+  },
   onMove(e) {
-    if (!this.enabled) return;
+    if (!this.enabled && !this.fallback()) return;
     const id = e.pointerId;
     const role = this.touchRole[id];
     if (role === undefined) return;   // ignore untracked (e.g. desktop mouse hover)
@@ -11829,7 +11908,7 @@ const Mobile = {
     }
   },
   onUp(e) {
-    if (!this.enabled) return;
+    if (!this.enabled && !this.fallback()) return;
     const id = e.pointerId;
     const role = this.touchRole[id];
     if (role === undefined) return;
@@ -11964,7 +12043,7 @@ const Mobile = {
   isSlotScreen(s) { return s === 'inventory' || s === 'crafting' || s === 'furnace' || s === 'chest'; },
   menuStart(id, x, y) {
     // a tap anywhere while chat is up dismisses the keyboard/chat
-    if (typeof Chat !== 'undefined' && Chat.open) { this.closeKeyboard(); return; }
+    if (typeof Chat !== 'undefined' && Chat.open) { this.closeKeyboard(); this.closeChat(); return; }
     // close (X) button drawn by Mobile when a menu is open
     if (UI.screen !== 'none' && this.closeHit(x, y)) { this.closeMenu(); return; }
     UI.mx = x / UI.scale; UI.my = y / UI.scale;
@@ -12089,12 +12168,22 @@ const Mobile = {
     }
   },
   onKbBlur() {
-    if (this.kbTarget === 'chat' && typeof Chat !== 'undefined' && Chat.open) Chat.close();
+    const t = this.kbTarget;
     this.kbTarget = null;
+    if (t === 'chat') this.closeChat();
   },
+  // NOTE: clear kbTarget BEFORE blurring (blur fires synchronously) but still close
+  // the chat afterwards — an earlier version left Chat.open === true here, which made
+  // inPlay() false forever: every tap went to menuStart, menuStart called this and
+  // nothing happened → the game was frozen until a page reload.
   closeKeyboard() {
+    const t = this.kbTarget;
     this.kbTarget = null;
     if (this.kbEl) { try { this.kbEl.blur(); } catch (e) {} }
+    if (t === 'chat') this.closeChat();
+  },
+  closeChat() {
+    if (typeof Chat !== 'undefined' && Chat.open) Chat.close();
   },
 
   // ---- per-frame safety ----
@@ -12105,7 +12194,13 @@ const Mobile = {
 
   // ---- rendering ----
   draw() {
-    if (!this.enabled) return;
+    if (!this.enabled) {
+      // fallback mode: just the close (X) on menus + the pause button in play
+      if (!this.fallback()) return;
+      if (UI.screen !== 'none') { this.drawCloseBtn(); return; }
+      if (this.inPlay()) this.drawControl('pause', false);
+      return;
+    }
     const ctx = UI.ctx;
     if (UI.screen === 'touchedit') { this.drawEditor(); return; }
     if (UI.screen !== 'none') { this.drawCloseBtn(); return; }
@@ -12309,6 +12404,9 @@ const Game = {
   mpSlots: 4, // room size the host offers (total players, us included)
   freeSkinSlots: null,
   mpEnvTimer: 0, sleeping: false,
+  // host: per-player-name save data for everyone who ever joined this world, so a
+  // guest gets their own inventory/position back when they come back (see mpSendWorld).
+  guestData: {}, mpStateTimer: 0, mpAwaitingName: new Map(),
   loadQueue: null,
   pendingSave: null,
   // first-person bare-arm pose (live-tweakable via MC.game.armPose.* for tuning)
@@ -12446,6 +12544,9 @@ const Game = {
   initNet() {
     if (this._netInit) return;
     this._netInit = true;
+    // we're in: introduce ourselves straight away. The host waits for this name
+    // before sending the world snapshot, so it can put our saved character in it.
+    Net.on('joined', () => this.mpSendHello());
     // somebody new is in the room: greet them, and (if we host) hand them the world
     Net.on('peer_join', (m) => this.onPeerJoin(m));
     Net.on('peer_leave', (m) => this.onPeerLeave(m));
@@ -12460,13 +12561,20 @@ const Game = {
     Net.on('spawnReq', (m) => this.onRemoteSpawnReq(m));// host: a guest asked us to spawn a mob/tnt/arrow
     Net.on('mhit', (m) => this.onRemoteMobHit(m));      // host: a guest hit one of our mobs
     Net.on('phit', (m) => this.onRemotePhit(m));        // anyone: another player hit me
-    Net.on('hello', (m) => { const r = this.getRemote(m.from); if (r) r.name = (m.name || '').slice(0, 16) || 'Player'; });
+    Net.on('hello', (m) => {
+      const r = this.getRemote(m.from);
+      if (r) r.name = (m.name || '').slice(0, 16) || 'Player';
+      this.mpWorldForNamed(m.from, r ? r.name : null);
+    });
+    Net.on('pstate', (m) => this.onRemoteState(m));   // host: a guest's character, to persist by name
     Net.on('chat', (m) => { const r = this.getRemote(m.from); UI.msg('<' + ((r && r.name) || 'Player') + '> ' + (m.text || '').slice(0, 200)); });
     Net.on('skin', (m) => { if (m.data) this.loadRemoteSkin(m.from, m.data); }); // another player's custom skin
     Net.on('env', (m) => this.onRemoteEnv(m));   // guest: host's authoritative time + weather
     Net.on('sleep', (m) => this.onRemoteSleep(m)); // another player got into / out of a bed
     Net.on('wake', (m) => this.onRemoteWake(m));   // host decided everyone slept → morning
     Net.on('closed', () => {
+      for (const t of this.mpAwaitingName.values()) clearTimeout(t);
+      this.mpAwaitingName.clear();
       this.clearRemotes();
       this.sleeping = false;
       if (this.isGuest) { UI.msg('Disconnected from host', '#ff5555'); }
@@ -12529,15 +12637,35 @@ const Game = {
   },
   onPeerJoin(m) {
     const pid = m.pid;
-    if (this.mpRole === 'host' && this.player) this.mpSendWorld(pid);
     this.mpSendHello(pid);
     this.mpSendSkin(pid);
+    // The world snapshot carries that player's saved character, so we wait for their
+    // `hello` (name) before sending it. Fallback timer covers an older client that
+    // never introduces itself — it just gets a fresh character.
+    if (this.mpRole === 'host' && this.player) {
+      const timer = setTimeout(() => { this.mpAwaitingName.delete(pid); this.mpSendWorld(pid, null); }, 2500);
+      this.mpAwaitingName.set(pid, timer);
+    }
     UI.msg('A player joined!  (' + Net.count + '/' + Net.slots + ')');
   },
+  // host: their name arrived → hand over the world plus whatever they left behind
+  mpWorldForNamed(pid, name) {
+    const timer = this.mpAwaitingName.get(pid);
+    if (timer === undefined) return;   // already sent (or we're not the host)
+    clearTimeout(timer);
+    this.mpAwaitingName.delete(pid);
+    this.mpSendWorld(pid, name);
+  },
+  // one key per display name — rejoin with the same name, get your stuff back
+  mpDataKey(name) { return String(name || 'Player').trim().toLowerCase().slice(0, 16) || 'player'; },
   onPeerLeave(m) {
     const r = this.remotes.get(m.pid);
     const name = (r && r.name) ? r.name : 'A player';
+    const timer = this.mpAwaitingName.get(m.pid);
+    if (timer !== undefined) { clearTimeout(timer); this.mpAwaitingName.delete(m.pid); }
     this.removeRemote(m.pid);
+    // persist their character (and the world) right away, not at the next autosave
+    if (this.mpRole === 'host') this.saveGame();
     UI.msg(name + ' left  (' + Net.count + '/' + Net.slots + ')');
     this.mpCheckSleep();
   },
@@ -12547,15 +12675,17 @@ const Game = {
     // network snapshot small — the guest re-derives spawn tracking on its own.
     const d = this.dimSave(w);
     delete d.spawned;
+    delete d.ents;   // the host streams live entities separately (phase 4b/4c)
     return d;
   },
   // `to` = the pid of the player who just joined (the world snapshot is big, so it's
   // only ever sent to the one peer that needs it, never broadcast to the whole room)
-  mpSendWorld(to) {
+  mpSendWorld(to, name) {
     const p = this.player, w = this.world;
     Net.send('world', {
       seed: this.seed, mode: this.mode, time: this.time, dim: w.dim,
       hostPos: { x: p.x, y: p.y, z: p.z },
+      pdata: (name != null ? this.guestData[this.mpDataKey(name)] : null) || null,
       dims: {
         overworld: this.netDimSave(this.dims.overworld),
         nether: this.netDimSave(this.dims.nether),
@@ -12571,6 +12701,40 @@ const Game = {
     return (this.mpName || 'Player').slice(0, 16);
   },
   mpSaveName() { try { localStorage.setItem('mcpe_name', this.mpName || ''); } catch (e) {} },
+  // ---- guest characters (host-side persistence, keyed by display name) ----
+  // The host's world save owns everyone's inventory: guests stream their character
+  // to the host every few seconds, the host stores it under their name and hands it
+  // straight back inside the world snapshot the next time they join.
+  mpMyState() {
+    const p = this.player;
+    return {
+      dim: this.world.dim,
+      x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2),
+      yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3),
+      hp: p.hp, hunger: p.hunger, sat: p.saturation,
+      xp: p.xp, lvl: p.xpLevel, prog: p.xpProgress,
+      inv: p.inventory.slots, armor: p.inventory.armor, sel: p.selected,
+      spawn: [p.spawnX, p.spawnY, p.spawnZ], bed: p.bedSpawn,
+    };
+  },
+  mpSendState(dt) {
+    if (!this.isGuest || !Net.connected || !this.player) return;
+    this.mpStateTimer += dt;
+    if (this.mpStateTimer < 5) return;
+    this.mpStateTimer = 0;
+    Net.send('pstate', { d: this.mpMyState() }, 0);
+  },
+  // send our character right now (leaving the room — don't lose the last 5 seconds)
+  mpFlushState() {
+    if (!this.isGuest || !Net.connected || !this.player) return;
+    this.mpStateTimer = 0;
+    Net.send('pstate', { d: this.mpMyState() }, 0);
+  },
+  onRemoteState(m) {
+    if (this.mpRole !== 'host' || !m.d) return;
+    const r = this.remotes.get(m.from);
+    this.guestData[this.mpDataKey(r && r.name)] = m.d;
+  },
   // `to` omitted = tell the whole room; `to` set = only the peer that just joined
   mpSendHello(to) { Net.send('hello', { name: this.mpMyName() }, to); },
   // broadcast a chat line to every other player in the room (routed via relay, not the host)
@@ -12736,19 +12900,45 @@ const Game = {
     this.mpSendSkin();
     this.currentWorldId = 0;
     const hp = m.hostPos || { x: 8, y: 70, z: 8 };
+    // the host remembers every player by name: if we've been on this world before we
+    // get our own inventory / health / position back instead of a fresh character
+    const d = m.pdata;
+    // the stacks come off the wire: drop anything this build doesn't know, otherwise
+    // holding an unknown item id crashes the view-model renderer
+    const clean = (arr, n) => {
+      const out = new Array(n).fill(null);
+      if (Array.isArray(arr)) for (let i = 0; i < n; i++) {
+        const s = arr[i];
+        if (s && s.id && Items[s.id] && s.n > 0) out[i] = s;
+      }
+      return out;
+    };
+    // only reuse the saved position if we left from the dimension the host is in now
+    // (guests always play in the host's dimension), otherwise land next to the host
+    const samePlace = d && (d.dim || 'overworld') === (m.dim || 'overworld');
+    const player = d ? {
+      x: samePlace ? d.x : hp.x + 1.5, y: samePlace ? d.y : hp.y, z: samePlace ? d.z : hp.z + 1.5,
+      yaw: d.yaw || 0, pitch: d.pitch || 0,
+      // hp>0: never come back already dead if they disconnected mid-death
+      hp: d.hp > 0 ? d.hp : 20, hunger: d.hunger != null ? d.hunger : 20, sat: d.sat != null ? d.sat : 5,
+      xp: d.xp || 0, lvl: d.lvl || 0, prog: d.prog || 0,
+      inv: clean(d.inv, 36), armor: clean(d.armor, 4), sel: clamp(d.sel || 0, 0, 8),
+      spawn: d.spawn || [hp.x, hp.y, hp.z], bed: d.bed || null,
+    } : {
+      x: hp.x + 1.5, y: hp.y, z: hp.z + 1.5, yaw: 0, pitch: 0,
+      hp: 20, hunger: 20, sat: 5, xp: 0, lvl: 0, prog: 0,
+      inv: new Array(36).fill(null), armor: [null, null, null, null], sel: 0,
+      spawn: [hp.x, hp.y, hp.z], bed: null,
+    };
     const save = {
       v: 1, seed: m.seed, time: m.time, dim: m.dim || 'overworld', mode: m.mode || 'survival',
       dragonKilled: false, dragonSpawned: false, achievements: {},
-      player: {
-        x: hp.x + 1.5, y: hp.y, z: hp.z + 1.5, yaw: 0, pitch: 0,
-        hp: 20, hunger: 20, sat: 5, xp: 0, lvl: 0, prog: 0,
-        inv: new Array(36).fill(null), armor: [null, null, null, null], sel: 0,
-        spawn: [hp.x, hp.y, hp.z], bed: null,
-      },
+      player,
       dims: m.dims,
     };
     this.startWorld(m.seed, save);
-    UI.msg('Joined! Look around for the other player.');
+    this.mpStateTimer = 0;
+    UI.msg(d ? 'Welcome back! Your stuff was waiting for you.' : 'Joined! Look around for the other player.');
   },
   onRemotePos(m) {
     const r = this.getRemote(m.from);
@@ -13179,7 +13369,7 @@ const Game = {
         if (this.mpRole === 'host' && Net.role === 'host') Net.setSlots(this.mpSlots);
         break;
       case 'mp_stop': Net.disconnect(); this.clearRemotes(); this.mpRole = null; break;
-      case 'mp_leave': Net.disconnect(); this.clearRemotes(); this.isGuest = false; this.mpRole = null; this.toTitle(); break;
+      case 'mp_leave': this.mpFlushState(); Net.disconnect(); this.clearRemotes(); this.isGuest = false; this.mpRole = null; this.toTitle(); break;
       case 'worlds_play': if (UI.selectedWorld != null) this.loadGame(UI.selectedWorld); break;
       case 'worlds_create': this.state = 'create'; UI.seedInput = ''; UI.nameInput = ''; UI.createFocus = 'name'; UI.createMode = 'survival'; break;
       case 'worlds_delete': if (UI.selectedWorld != null) { this.deleteWorld(UI.selectedWorld); UI.selectedWorld = null; } break;
@@ -13273,8 +13463,12 @@ const Game = {
     this.dragonKilled = false; this.dragonSpawned = false;
     this.time = 1000;
     this.achievements = {};
+    this.guestData = {};
     Weather.reset();
     this.player = new Player(this);
+    // A loaded save already knows exactly where the player stood — including deep in
+    // a cave. Only a brand-new world needs the "drop onto the surface" settle pass.
+    this.needSettle = !save;
     if (save) {
       this.applySave(save);
     } else {
@@ -13316,11 +13510,21 @@ const Game = {
     }
     this.loadingProgress = 1 - this.loadQueue.length / this.loadTotal;
     if (!this.loadQueue.length) {
-      // settle player on ground
       const p = this.player;
-      for (let y = 126; y > 1; y--) {
-        if (Blocks[this.world.getBlock(floor(p.x), y, floor(p.z))].solid) { p.y = Math.max(p.y, y + 1.01); break; }
+      if (this.needSettle) {
+        // fresh world / respawn: drop onto the top of the column
+        for (let y = 126; y > 1; y--) {
+          if (Blocks[this.world.getBlock(floor(p.x), y, floor(p.z))].solid) { p.y = Math.max(p.y, y + 1.01); break; }
+        }
+      } else {
+        // loaded save: keep the saved height (a cave stays a cave). Only nudge up if
+        // the spot got filled in meanwhile, so we never wake up stuck inside blocks.
+        const bx = floor(p.x), bz = floor(p.z);
+        const solidAt = (yy) => Blocks[this.world.getBlock(bx, floor(yy), bz)].solid;
+        for (let i = 0; i < 4 && (solidAt(p.y + 0.1) || solidAt(p.y + 1.6)); i++) p.y = floor(p.y) + 1.01;
       }
+      p.fallStart = p.y;
+      this.needSettle = false;
       // build initial meshes synchronously-ish
       Renderer.updateChunkMeshes(this.world, p.x, p.z, Math.min(4, this.renderDist));
       this.state = 'play';
@@ -13343,6 +13547,7 @@ const Game = {
         return o;
       }),
       spawned: [...w.spawnedChunks],
+      ents: saveEntities(w),   // mobs / boats / dropped items stay where you left them
     };
   },
   saveGame() {
@@ -13361,6 +13566,7 @@ const Game = {
           inv: p.inventory.slots, armor: p.inventory.armor, sel: p.selected,
           spawn: [p.spawnX, p.spawnY, p.spawnZ], bed: p.bedSpawn,
         },
+        guests: this.guestData,   // every guest's character, keyed by their name
         dims: { overworld: dimSave(this.dims.overworld), nether: dimSave(this.dims.nether), end: dimSave(this.dims.end) },
       };
       localStorage.setItem('mcjs_save_' + (this.currentWorldId || 0), JSON.stringify(save));
@@ -13383,12 +13589,14 @@ const Game = {
     if (save.weather) Weather.set(save.weather, save.weatherTime);
     this.dragonKilled = save.dragonKilled; this.dragonSpawned = save.dragonSpawned;
     this.achievements = save.achievements || {};
+    this.guestData = save.guests || {};
     for (const dim of ['overworld', 'nether', 'end']) {
       const w = this.dims[dim], d = save.dims[dim];
       if (!d) continue;
       w.edits = new Map(d.edits);
       for (const be of d.be) w.blockEntities.set(be.x + ',' + be.y + ',' + be.z, be);
       w.spawnedChunks = new Set(d.spawned || []);
+      loadEntities(w, d.ents);
     }
     this.world = this.dims[save.dim];
     const p = this.player, sp = save.player;
@@ -13457,6 +13665,9 @@ const Game = {
     // respawn in overworld
     if (this.world.dim !== 'overworld') this.world = this.dims.overworld;
     this.player.respawn();
+    // a bed spawn is an exact spot (can be underground); only the world spawn wants
+    // the "drop onto the surface" pass
+    this.needSettle = !this.player.bedSpawn;
     this.state = 'loading';
     this.loadingTitle = 'Respawning';
     this.loadingSub = '';
@@ -13724,6 +13935,7 @@ const Game = {
       this.mpBroadcastDrops(dt);
       this.mpBroadcastEnts(dt);
       this.mpBroadcastEnv(dt);
+      this.mpSendState(dt);
       this.mpUpdateSleep();
       Particles.update(dt, w);
       Weather.update(dt, this);
