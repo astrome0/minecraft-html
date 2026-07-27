@@ -10051,6 +10051,7 @@ const UI = {
   seedInput: '', seedFocus: true,
   nameInput: '', createFocus: 'name', selectedWorld: null, createMode: 'survival',
   mpCode: '', mpFocus: 'code',
+  mpNotice: '', // why we're back on the join screen (host quit, connection lost...)
   creativeScroll: 0, creativeItems: null,
   toasts: [], messages: [],
   itemNameT: 0, itemNameTxt: '',
@@ -11088,6 +11089,7 @@ const UI = {
 
     if (status === 'connecting' || status === 'joining') this.textC('Connecting...', W / 2, H * 0.56, '#ffff55');
     if (N && N.errorMsg) this.textC(N.errorMsg, W / 2, H * 0.56, '#ff5555');
+    else if (this.mpNotice) this.textC(this.mpNotice, W / 2, H * 0.56, '#ffaa00');
     this.textC('To host your own world: open it, then Pause -> Host', W / 2, H * 0.72, '#909090');
     this.button('mp_back', W / 2 - 100, H - 30, 200, 'Back');
   },
@@ -11127,7 +11129,9 @@ const UI = {
       this.button('mp_host_live', bx + 104, y, 96, 'Host World'); y += 24;
       this.textC('you + ' + (game.mpSlots - 1) + ' friend' + (game.mpSlots === 2 ? '' : 's'), W / 2, y, '#909090'); y += 12;
     }
-    this.button('quit', bx, y, 200, 'Save and Quit to Title');
+    // a guest is only visiting somebody else's world — there is nothing of theirs
+    // to save here, so "Leave Game" above is their only way out
+    if (!game.isGuest) this.button('quit', bx, y, 200, 'Save and Quit to Title');
   },
   drawOptions(game) {
     this.dimBg(0.6);
@@ -12567,6 +12571,7 @@ const Game = {
       this.mpWorldForNamed(m.from, r ? r.name : null);
     });
     Net.on('pstate', (m) => this.onRemoteState(m));   // host: a guest's character, to persist by name
+    Net.on('flush', () => this.mpFlushState());       // guest: host is closing, send your character NOW
     Net.on('chat', (m) => { const r = this.getRemote(m.from); UI.msg('<' + ((r && r.name) || 'Player') + '> ' + (m.text || '').slice(0, 200)); });
     Net.on('skin', (m) => { if (m.data) this.loadRemoteSkin(m.from, m.data); }); // another player's custom skin
     Net.on('env', (m) => this.onRemoteEnv(m));   // guest: host's authoritative time + weather
@@ -12577,9 +12582,16 @@ const Game = {
       this.mpAwaitingName.clear();
       this.clearRemotes();
       this.sleeping = false;
-      if (this.isGuest) { UI.msg('Disconnected from host', '#ff5555'); }
-      else if (this.mpRole === 'host') UI.msg('Multiplayer closed: ' + (Net.errorMsg || ''), '#ff5555');
+      const wasGuest = this.isGuest, wasHost = this.mpRole === 'host';
       this.mpRole = null; this.isGuest = false;
+      // the room is gone (host quit, stopped hosting, relay reaped it) — a guest has
+      // no world of their own left to stand in, so send them back to the join screen
+      if (wasGuest) this.mpKickToMenu('Session ended - the host disconnected');
+      else if (wasHost) UI.msg('Multiplayer closed: ' + (Net.errorMsg || ''), '#ff5555');
+    });
+    // the socket itself died without a 'closed' frame (relay down, wifi dropped)
+    Net.on('close', (m) => {
+      if (this.isGuest && m && m.wasConnected) this.mpKickToMenu('Connection to the host was lost');
     });
   },
   // ---------- the other players in the room (phase 5: any number, not just one) ----------
@@ -12729,6 +12741,15 @@ const Game = {
     if (!this.isGuest || !Net.connected || !this.player) return;
     this.mpStateTimer = 0;
     Net.send('pstate', { d: this.mpMyState() }, 0);
+  },
+  // host is about to close the room: ask every guest for their character right now
+  // (their 5s stream can be that stale), give the answers a moment to land, then `done`
+  mpCollectAndClose(done) {
+    if (this.mpRole === 'host' && Net.connected && Net.peers.length) {
+      UI.msg('Saving players...', '#ffff55');
+      Net.send('flush', {});
+      setTimeout(done, 350);
+    } else done();
   },
   onRemoteState(m) {
     if (this.mpRole !== 'host' || !m.d) return;
@@ -13350,8 +13371,9 @@ const Game = {
     }
     switch (id) {
       case 'single': this.state = 'worlds'; UI.selectedWorld = null; break;
-      case 'multiplayer_menu': this.state = 'mp'; UI.mpCode = ''; UI.mpFocus = 'name'; this.mpMyName(); this.mpRole = null; this.isGuest = false; Net.disconnect(); this.clearRemotes(); this.initNet(); break;
+      case 'multiplayer_menu': this.state = 'mp'; UI.mpCode = ''; UI.mpFocus = 'name'; UI.mpNotice = ''; this.mpMyName(); this.mpRole = null; this.isGuest = false; Net.disconnect(); this.clearRemotes(); this.initNet(); break;
       case 'mp_join':
+        UI.mpNotice = '';
         if ((UI.mpCode || '').length === 6) { this.initNet(); Net.join(Net.defaultRelayUrl(), UI.mpCode); }
         else Net.errorMsg = 'Enter a 6-digit code';
         break;
@@ -13359,7 +13381,7 @@ const Game = {
       case 'mp_focus_name': UI.mpFocus = 'name'; if (Mobile.enabled) Mobile.openKeyboard('mpname'); break;
       case 'mp_upload_skin': this.pickSkin(); break;
       case 'mp_cancel': Net.disconnect(); this.state = 'mp'; UI.mpCode = ''; break;
-      case 'mp_back': Net.disconnect(); this.state = 'title'; break;
+      case 'mp_back': Net.disconnect(); this.state = 'title'; UI.mpNotice = ''; break;
       // hosting the currently-loaded world, from the pause menu
       case 'mp_host_live': this.mpRole = 'host'; this.isGuest = false; this.initNet(); Net.host(Net.defaultRelayUrl(), this.mpSlots); break;
       // how many players the room may hold (us included) — cycles 2..10, wraps round
@@ -13368,8 +13390,19 @@ const Game = {
         try { localStorage.setItem('mcpe_slots', String(this.mpSlots)); } catch (e) {}
         if (this.mpRole === 'host' && Net.role === 'host') Net.setSlots(this.mpSlots);
         break;
-      case 'mp_stop': Net.disconnect(); this.clearRemotes(); this.mpRole = null; break;
-      case 'mp_leave': this.mpFlushState(); Net.disconnect(); this.clearRemotes(); this.isGuest = false; this.mpRole = null; this.toTitle(); break;
+      // stop hosting but stay in the world — the relay closes the room, so every
+      // guest gets bounced back to their multiplayer screen
+      case 'mp_stop':
+        if (this._mpClosing) break;
+        this._mpClosing = true;
+        this.mpCollectAndClose(() => {
+          this._mpClosing = false;
+          this.saveGame();  // keeps whatever the guests were carrying
+          Net.disconnect(); this.clearRemotes(); this.mpRole = null;
+          UI.msg('Multiplayer stopped', '#ffaa00');
+        });
+        break;
+      case 'mp_leave': this.mpFlushState(); this.toTitle(); break;
       case 'worlds_play': if (UI.selectedWorld != null) this.loadGame(UI.selectedWorld); break;
       case 'worlds_create': this.state = 'create'; UI.seedInput = ''; UI.nameInput = ''; UI.createFocus = 'name'; UI.createMode = 'survival'; break;
       case 'worlds_delete': if (UI.selectedWorld != null) { this.deleteWorld(UI.selectedWorld); UI.selectedWorld = null; } break;
@@ -13394,13 +13427,41 @@ const Game = {
       case 'touch_done': UI.screen = 'options'; break;
       case 'touch_reset': Mobile.resetLayout(); break;
       case 'touch_cross': Mobile.layout.crosshair = !Mobile.layout.crosshair; Mobile.save(); break;
-      case 'quit': this.saveGame(); this.toTitle(); break;
+      // saving also ends hosting (toTitle closes the room), which kicks the guests
+      case 'quit':
+        if (this.isGuest) { this.onButton('mp_leave'); break; }
+        if (this._mpClosing) break;
+        this._mpClosing = true;
+        this.mpCollectAndClose(() => { this._mpClosing = false; this.saveGame(); this.toTitle(); });
+        break;
       case 'quit_dead': this.toTitle(); break;
       case 'respawn': this.respawn(); break;
       case 'credits_done': this.endCredits(); break;
     }
   },
+  // dropped out of somebody else's world: tear it down like a normal quit, but land
+  // on the multiplayer screen (code / name / skin) instead of the title, with a note
+  mpKickToMenu(reason) {
+    // drop the dead connection first: it clears Net.errorMsg/status, so the join
+    // screen shows our own reason instead of the raw relay error
+    Net.disconnect();
+    this.clearRemotes();
+    this.mpRole = null; this.isGuest = false;
+    this.toTitle();
+    this.state = 'mp';
+    UI.mpCode = '';
+    UI.mpFocus = 'name';
+    UI.mpNotice = reason || '';
+    this.mpMyName();
+  },
   toTitle() {
+    // leaving the world always ends our multiplayer session: a host closes the room
+    // (the relay then kicks every guest), a guest just drops their connection
+    if (this.mpRole === 'host' || this.isGuest) {
+      Net.disconnect();
+      this.clearRemotes();
+      this.mpRole = null; this.isGuest = false;
+    }
     UI.screen = 'none';
     Chat.open = false;
     Chat.input = '';
@@ -13502,6 +13563,31 @@ const Game = {
     this.loadQueue = q;
     this.loadTotal = q.length;
   },
+  // is the player's actual footprint (not just its center point) touching a solid
+  // block at feet/head height y..y+h? A saved/network position can land inside a
+  // wall — terrain changed while the player was away, or a raw teleport/network
+  // payload (guest rejoin) was applied with no collision check at all.
+  playerBoxSolid(p, y) {
+    const w = p.w / 2 - 0.02;
+    for (const dx of [-w, w]) for (const dz of [-w, w]) {
+      const bx = floor(p.x + dx), bz = floor(p.z + dz);
+      if (Blocks[this.world.getBlock(bx, floor(y + 0.05), bz)].solid) return true;
+      if (Blocks[this.world.getBlock(bx, floor(y + p.h - 0.05), bz)].solid) return true;
+    }
+    return false;
+  },
+  // Never leave the player stuck needing to mine their way out. First try climbing
+  // straight up in place (cheap, keeps a cave a cave if it's merely a low ceiling);
+  // if that runs out of headroom (e.g. saved deep inside solid rock), fall back to
+  // the same "drop onto the surface" scan a fresh world uses.
+  unstickPlayer(p) {
+    if (!this.playerBoxSolid(p, p.y)) return;
+    for (let i = 0; i < 40 && this.playerBoxSolid(p, p.y); i++) p.y = floor(p.y) + 1.01;
+    if (!this.playerBoxSolid(p, p.y)) return;
+    for (let y = 126; y > 1; y--) {
+      if (Blocks[this.world.getBlock(floor(p.x), y, floor(p.z))].solid) { p.y = y + 1.01; break; }
+    }
+  },
   updateLoading() {
     const t0 = performance.now();
     while (this.loadQueue.length && performance.now() - t0 < 30) {
@@ -13517,11 +13603,9 @@ const Game = {
           if (Blocks[this.world.getBlock(floor(p.x), y, floor(p.z))].solid) { p.y = Math.max(p.y, y + 1.01); break; }
         }
       } else {
-        // loaded save: keep the saved height (a cave stays a cave). Only nudge up if
-        // the spot got filled in meanwhile, so we never wake up stuck inside blocks.
-        const bx = floor(p.x), bz = floor(p.z);
-        const solidAt = (yy) => Blocks[this.world.getBlock(bx, floor(yy), bz)].solid;
-        for (let i = 0; i < 4 && (solidAt(p.y + 0.1) || solidAt(p.y + 1.6)); i++) p.y = floor(p.y) + 1.01;
+        // loaded save / guest rejoin: keep the saved height (a cave stays a cave),
+        // but never hand back a position embedded in a block.
+        this.unstickPlayer(p);
       }
       p.fallStart = p.y;
       this.needSettle = false;
