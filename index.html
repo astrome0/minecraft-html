@@ -3608,7 +3608,10 @@ class World {
     const def = Blocks[id];
     // container contents spill out (chest, furnace) — must run before setBlock deletes the BE
     const beSpill = this.blockEntities.get(x + ',' + y + ',' + z);
-    if (beSpill && beSpill.items && typeof spawnItemEntity === 'function') {
+    // multiplayer: a guest's copy of a container can be stale, so it never spills —
+    // the host does it from the authoritative contents when our edit reaches it
+    const guestSkipSpill = typeof Game !== 'undefined' && Game.isGuest && typeof Net !== 'undefined' && Net.connected;
+    if (beSpill && beSpill.items && !guestSkipSpill && typeof spawnItemEntity === 'function') {
       for (const s of beSpill.items) if (s) spawnItemEntity(this, x + 0.5, y + 0.5, z + 0.5, s, true);
       beSpill.items = beSpill.items.map(() => null);
     }
@@ -4431,9 +4434,11 @@ class World {
     }
     // pressure plates: pressed while a player/mob stands on them
     if (this.redstonePlates.size) this.tickPressurePlates(game);
-    // block entities: furnaces + spawners
+    // block entities: furnaces + spawners. A guest smelts nothing itself — the host
+    // owns every furnace and streams its progress back (else both sides would smelt).
+    const guest = typeof Game !== 'undefined' && Game.isGuest && typeof Net !== 'undefined' && Net.connected;
     for (const be of this.blockEntities.values()) {
-      if (be.type === 'furnace') this.tickFurnace(be);
+      if (be.type === 'furnace') { if (!guest) this.tickFurnace(be); }
       else if (be.type === 'spawner') this.tickSpawner(be, game);
     }
     // random ticks: crops, saplings, grass spread — only near player
@@ -9283,6 +9288,7 @@ class Player {
       const k = hit.x + ',' + hit.y + ',' + hit.z;
       let be = w.blockEntities.get(k);
       if (!be) { be = { type: 'furnace', x: hit.x, y: hit.y, z: hit.z, items: [null, null, null], burn: 0, burnMax: 0, cook: 0 }; w.blockEntities.set(k, be); }
+      if (!g.mpOpenContainer(be)) return true; // somebody else is in it
       UI.openFurnace(be);
       return true;
     }
@@ -9290,6 +9296,7 @@ class Player {
       const k = hit.x + ',' + hit.y + ',' + hit.z;
       let be = w.blockEntities.get(k);
       if (!be) { be = { type: 'chest', x: hit.x, y: hit.y, z: hit.z, items: new Array(27).fill(null) }; w.blockEntities.set(k, be); }
+      if (!g.mpOpenContainer(be)) return true; // somebody else is in it
       UI.openChest(be);
       Sfx.play('chestOpen', { pos: [hit.x, hit.y, hit.z] });
       return true;
@@ -10047,6 +10054,7 @@ const UI = {
   craftGrid: new Array(9).fill(null),
   craftSize: 2,
   furnaceBE: null, chestBE: null,
+  beSyncing: false, // guest: container slots are locked until the host's contents land
   buttons: [], sliders: [], dragSlider: null,
   seedInput: '', seedFocus: true,
   nameInput: '', createFocus: 'name', selectedWorld: null, createMode: 'survival',
@@ -10189,6 +10197,8 @@ const UI = {
       this.cursorStack = null;
     }
     if (this.screen === 'chest') Sfx.play('chestClose');
+    // hand the container back so somebody else can open it
+    if (this.screen === 'chest' || this.screen === 'furnace') Game.mpCloseContainer();
     this.screen = 'none';
     this.furnaceBE = null; this.chestBE = null;
     if (Game.state === 'play') Game.requestPointer();
@@ -10430,7 +10440,12 @@ const UI = {
       const slots = this.activeSlots();
       for (const s of slots) {
         if (this.mx >= s.x && this.mx < s.x + 18 && this.my >= s.y && this.my < s.y + 18) {
+          // waiting for the host's contents: touching anything now would work off a
+          // stale copy, which is exactly how stacks used to get duplicated
+          if (this.beSyncing) return true;
           this.slotClick(s, btn, shift);
+          // a guest's container edit only counts once the host knows about it
+          if (this.screen === 'chest' || this.screen === 'furnace') Game.mpSendBE();
           return true;
         }
       }
@@ -10860,7 +10875,7 @@ const UI = {
     this.dimBg();
     const px = this.W() / 2 - 88, py = this.H() / 2 - 83;
     this.panel(px, py, 176, 166);
-    this.text('Furnace', px + 60, py + 6, '#404040', false);
+    this.text(this.beSyncing ? 'Furnace (syncing...)' : 'Furnace', px + (this.beSyncing ? 40 : 60), py + 6, '#404040', false);
     this.text('Inventory', px + 8, py + 74, '#404040', false);
     const be = this.furnaceBE;
     const slots = this.activeSlots();
@@ -10890,7 +10905,7 @@ const UI = {
     this.dimBg();
     const px = this.W() / 2 - 88, py = this.H() / 2 - 83;
     this.panel(px, py, 176, 166);
-    this.text('Chest', px + 8, py + 7, '#404040', false);
+    this.text(this.beSyncing ? 'Chest  (syncing...)' : 'Chest', px + 8, py + 7, '#404040', false);
     this.text('Inventory', px + 8, py + 76, '#404040', false);
     const slots = this.activeSlots();
     for (const s of slots) {
@@ -12411,6 +12426,9 @@ const Game = {
   // host: per-player-name save data for everyone who ever joined this world, so a
   // guest gets their own inventory/position back when they come back (see mpSendWorld).
   guestData: {}, mpStateTimer: 0, mpAwaitingName: new Map(),
+  // containers (chests/furnaces) are host-authoritative and opened one player at a
+  // time. host: key 'x,y,z' -> pid holding it. guest: the container we have open.
+  beLocks: new Map(), beOpenKey: null, beHold: 0, beTimer: 0, beWaitT: 0,
   loadQueue: null,
   pendingSave: null,
   // first-person bare-arm pose (live-tweakable via MC.game.armPose.* for tuning)
@@ -12572,6 +12590,11 @@ const Game = {
     });
     Net.on('pstate', (m) => this.onRemoteState(m));   // host: a guest's character, to persist by name
     Net.on('flush', () => this.mpFlushState());       // guest: host is closing, send your character NOW
+    Net.on('beOpen', (m) => this.onBeOpen(m));        // host: a guest wants to open a chest/furnace
+    Net.on('beSet', (m) => this.onBeSet(m));          // host: the lock holder's new contents
+    Net.on('beClose', (m) => this.onBeClose(m));      // host: release the container lock
+    Net.on('beState', (m) => this.onBeState(m));      // guest: authoritative container contents
+    Net.on('beDeny', (m) => this.onBeDeny(m));        // guest: somebody else has it open
     Net.on('chat', (m) => { const r = this.getRemote(m.from); UI.msg('<' + ((r && r.name) || 'Player') + '> ' + (m.text || '').slice(0, 200)); });
     Net.on('skin', (m) => { if (m.data) this.loadRemoteSkin(m.from, m.data); }); // another player's custom skin
     Net.on('env', (m) => this.onRemoteEnv(m));   // guest: host's authoritative time + weather
@@ -12582,6 +12605,7 @@ const Game = {
       this.mpAwaitingName.clear();
       this.clearRemotes();
       this.sleeping = false;
+      this.beLocks.clear(); this.beOpenKey = null; UI.beSyncing = false;
       const wasGuest = this.isGuest, wasHost = this.mpRole === 'host';
       this.mpRole = null; this.isGuest = false;
       // the room is gone (host quit, stopped hosting, relay reaped it) — a guest has
@@ -12676,6 +12700,8 @@ const Game = {
     const timer = this.mpAwaitingName.get(m.pid);
     if (timer !== undefined) { clearTimeout(timer); this.mpAwaitingName.delete(m.pid); }
     this.removeRemote(m.pid);
+    // they can't still be holding a chest open if they're gone
+    for (const [k, pid] of Array.from(this.beLocks)) if (pid === m.pid) this.beLocks.delete(k);
     // persist their character (and the world) right away, not at the next autosave
     if (this.mpRole === 'host') this.saveGame();
     UI.msg(name + ' left  (' + Net.count + '/' + Net.slots + ')');
@@ -12995,7 +13021,172 @@ const Game = {
   onRemoteBlocks(m) {
     if (!this.world || !m.edits) return;
     if (m.dim && m.dim !== this.world.dim) return; // only sync the shared (current) dimension for now
-    for (const e of m.edits) this.world.setBlock(e[0], e[1], e[2], e[3], e[4]);
+    for (const e of m.edits) {
+      // A guest that breaks a chest deliberately does NOT spill it (their copy may be
+      // stale — that's how items used to get duplicated). We own the real contents,
+      // so we drop them here, once, from our side.
+      if (this.mpRole === 'host' && e[3] === B.AIR) {
+        const key = this.beKey(e[0], e[1], e[2]);
+        const be = this.world.blockEntities.get(key);
+        if (be && be.items) {
+          for (const s of be.items) if (s) spawnItemEntity(this.world, e[0] + 0.5, e[1] + 0.5, e[2] + 0.5, s, true);
+          be.items = be.items.map(() => null);
+        }
+        this.beLocks.delete(key);
+      }
+      this.world.setBlock(e[0], e[1], e[2], e[3], e[4]);
+    }
+  },
+  // ---- container sync (chests + furnaces, host-authoritative) ----
+  // The host's block entity is the only real one. A guest asks to open a container,
+  // gets the current contents back, and streams every change it makes to the host.
+  // Only one player may have a given container open at a time — that lock is what
+  // stops two people taking the same stack (the old behaviour duplicated items).
+  beKey(x, y, z) { return x + ',' + y + ',' + z; },
+  beAt(key) { return this.world ? this.world.blockEntities.get(key) : null; },
+  // player.interactBlock asks before opening: true = open the UI now
+  mpOpenContainer(be) {
+    if (!Net.connected || (!this.mpRole && !this.isGuest)) return true; // single player
+    const key = this.beKey(be.x, be.y, be.z);
+    if (this.isGuest) {
+      // open straight away so it feels responsive, but keep the container slots
+      // locked until the host's contents land (UI.beSyncing)
+      this.beOpenKey = key; this.beHold = 0; this.beWaitT = 0;
+      UI.beSyncing = true;
+      Net.send('beOpen', { dim: this.world.dim, x: be.x, y: be.y, z: be.z }, 0);
+      return true;
+    }
+    const holder = this.beLocks.get(key);
+    if (holder != null && holder !== 0) { UI.msg('Someone else is using that', '#ffaa00'); return false; }
+    for (const [k, pid] of Array.from(this.beLocks)) if (pid === 0) this.beLocks.delete(k);
+    this.beLocks.set(key, 0);
+    this.beOpenKey = key;
+    return true;
+  },
+  // UI.closeScreen tells us the container window is gone
+  mpCloseContainer() {
+    const key = this.beOpenKey;
+    this.beOpenKey = null;
+    UI.beSyncing = false;
+    if (!key || !Net.connected) { if (key) this.beLocks.delete(key); return; }
+    if (this.isGuest) Net.send('beClose', { x: +key.split(',')[0], y: +key.split(',')[1], z: +key.split(',')[2] }, 0);
+    else this.beLocks.delete(key);
+  },
+  // guest: our open container changed → tell the host (and ignore its echo briefly,
+  // so a furnace push that crossed ours on the wire can't undo the click)
+  mpSendBE() {
+    if (!this.isGuest || !Net.connected || !this.beOpenKey) return;
+    const be = this.beAt(this.beOpenKey);
+    if (!be) return;
+    this.beHold = performance.now() + 500;
+    Net.send('beSet', { dim: this.world.dim, x: be.x, y: be.y, z: be.z, items: be.items }, 0);
+  },
+  // host: a guest wants a container
+  onBeOpen(m) {
+    if (this.mpRole !== 'host' || !this.world) return;
+    if (m.dim && m.dim !== this.world.dim) return;
+    const key = this.beKey(m.x, m.y, m.z);
+    const id = this.world.getBlock(m.x, m.y, m.z);
+    let be = this.world.blockEntities.get(key);
+    if (!be) {
+      // never opened on our side yet — create it the same way interactBlock would
+      if (id === B.CHEST) be = { type: 'chest', x: m.x, y: m.y, z: m.z, items: new Array(27).fill(null) };
+      else if (id === B.FURNACE || id === B.FURNACE_LIT) be = { type: 'furnace', x: m.x, y: m.y, z: m.z, items: [null, null, null], burn: 0, burnMax: 0, cook: 0 };
+      else { Net.send('beState', { x: m.x, y: m.y, z: m.z, gone: 1 }, m.from); return; }
+      this.world.blockEntities.set(key, be);
+    }
+    const holder = this.beLocks.get(key);
+    if (holder != null && holder !== m.from) { Net.send('beDeny', { x: m.x, y: m.y, z: m.z }, m.from); return; }
+    // nobody has two containers open at once: opening this one frees whatever they
+    // held before, so a lost beClose can't lock a chest for the rest of the session
+    for (const [k, pid] of Array.from(this.beLocks)) if (pid === m.from) this.beLocks.delete(k);
+    this.beLocks.set(key, m.from);
+    this.mpSendBeState(be, m.from);
+  },
+  mpSendBeState(be, to) {
+    Net.send('beState', {
+      x: be.x, y: be.y, z: be.z, t: be.type, items: be.items,
+      burn: be.burn, burnMax: be.burnMax, cook: be.cook, xpBank: be.xpBank,
+    }, to);
+  },
+  // host: the lock holder sent us their new contents
+  onBeSet(m) {
+    if (this.mpRole !== 'host' || !this.world) return;
+    if (m.dim && m.dim !== this.world.dim) return;
+    const key = this.beKey(m.x, m.y, m.z);
+    if (this.beLocks.get(key) !== m.from) return; // not theirs to edit
+    const be = this.world.blockEntities.get(key);
+    if (!be || !Array.isArray(m.items)) return;
+    // items only — burn/cook stay ours, the furnace keeps smelting underneath them
+    for (let i = 0; i < be.items.length; i++) be.items[i] = m.items[i] || null;
+  },
+  onBeClose(m) {
+    if (this.mpRole !== 'host') return;
+    const key = this.beKey(m.x, m.y, m.z);
+    if (this.beLocks.get(key) === m.from) this.beLocks.delete(key);
+  },
+  // guest: authoritative contents from the host
+  onBeState(m) {
+    if (!this.isGuest || !this.world) return;
+    const key = this.beKey(m.x, m.y, m.z);
+    if (m.gone) {
+      if (this.beOpenKey === key) { UI.msg('That container is gone', '#ffaa00'); UI.closeScreen(); }
+      this.world.blockEntities.delete(key);
+      return;
+    }
+    let be = this.world.blockEntities.get(key);
+    if (!be) {
+      be = { type: m.t || 'chest', x: m.x, y: m.y, z: m.z, items: [] };
+      this.world.blockEntities.set(key, be);
+    }
+    const opened = this.beOpenKey === key;
+    // our own change is still in flight — don't let the host's older snapshot undo it
+    if (opened && UI.beSyncing !== true && performance.now() < this.beHold) return;
+    be.items = (m.items || []).map(s => s || null);
+    if (m.burn !== undefined) { be.burn = m.burn; be.burnMax = m.burnMax; be.cook = m.cook; be.xpBank = m.xpBank; }
+    if (opened && UI.beSyncing) {
+      // the window is live now: point it at the synced entity and unlock the slots
+      if (UI.screen === 'chest') UI.chestBE = be;
+      else if (UI.screen === 'furnace') UI.furnaceBE = be;
+      UI.beSyncing = false;
+    }
+  },
+  onBeDeny(m) {
+    if (!this.isGuest) return;
+    if (this.beOpenKey === this.beKey(m.x, m.y, m.z)) {
+      UI.msg('Someone else is using that', '#ffaa00');
+      UI.closeScreen();
+    }
+  },
+  // host, ~4 Hz: keep whoever has a furnace open watching it burn, and drop locks
+  // whose container has been broken in the meantime
+  mpTickContainers(dt) {
+    if (this.mpRole !== 'host' || !Net.connected || !this.world) return;
+    this.beTimer += dt;
+    if (this.beTimer < 0.25) return;
+    this.beTimer = 0;
+    for (const [key, pid] of Array.from(this.beLocks)) {
+      // our own lock only lives as long as our window is actually up (dying or
+      // quitting with a chest open must not leave it locked for everyone else)
+      if (pid === 0 && UI.screen !== 'chest' && UI.screen !== 'furnace') { this.beLocks.delete(key); continue; }
+      const be = this.world.blockEntities.get(key);
+      if (!be) {
+        this.beLocks.delete(key);
+        if (pid !== 0) { const c = key.split(','); Net.send('beState', { x: +c[0], y: +c[1], z: +c[2], gone: 1 }, pid); }
+        continue;
+      }
+      if (pid !== 0 && be.type === 'furnace') this.mpSendBeState(be, pid);
+    }
+  },
+  // guest: the host never answered our beOpen (broken block, lost packet) — don't
+  // leave the player staring at a locked window
+  mpTickContainerWait(dt) {
+    if (!this.isGuest || !UI.beSyncing) return;
+    this.beWaitT += dt;
+    if (this.beWaitT < 3) return;
+    this.beWaitT = 0;
+    UI.msg('No answer from the host', '#ff5555');
+    UI.closeScreen();
   },
   // ---- dropped-item sync (phase 4b, host-authoritative) ----
   // Guest asks the host to spawn a drop (guests never own item entities).
@@ -14017,6 +14208,8 @@ const Game = {
       this.updateRemotes(dt);
       this.sendMyPos(dt);
       this.mpBroadcastDrops(dt);
+      this.mpTickContainers(dt);
+      this.mpTickContainerWait(dt);
       this.mpBroadcastEnts(dt);
       this.mpBroadcastEnv(dt);
       this.mpSendState(dt);
