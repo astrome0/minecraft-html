@@ -414,6 +414,7 @@ const B = {
   PISTON: 85, STICKY_PISTON: 86, PISTON_HEAD: 87,
   REDSTONE_BLOCK: 88, REPEATER: 89,
   REDSTONE_TORCH: 90, REDSTONE_TORCH_OFF: 91,
+  TRAPDOOR: 92, FENCE_GATE: 93,
 };
 
 // def fields:
@@ -423,6 +424,7 @@ const B = {
 // lum(light emitted 0-15) opacity(light attenuation; default: opaque?15:0)
 // sound('stone'|'wood'|'grass'|'gravel'|'sand'|'snow'|'cloth'|'glass')
 // drops(rng,tier,tool)→[{id,n}] (default: itself) replaceable flammable tint('grass'|'foliage')
+// pillar(logs: data bits0-1 = axis 0:y 1:x 2:z — top tex on the two ends, bark rotated to follow the axis)
 const Blocks = new Array(96).fill(null);
 function defBlock(id, def) {
   def.id = id;
@@ -439,6 +441,8 @@ function defBlock(id, def) {
   return def;
 }
 const drop1 = name => () => [{ id: name, n: 1 }];
+// slabs: a double slab (data bit 1) drops two, like vanilla
+const dropSlab = name => (rng, tier, tool, data) => [{ id: name, n: (data & 2) ? 2 : 1 }];
 
 defBlock(B.AIR, { name: 'air', label: 'Air', solid: false, opaque: false, model: 'none', hard: 0, drops: () => [] });
 defBlock(B.STONE, { name: 'stone', label: 'Stone', tex: { all: 'stone' }, hard: 1.5, tool: 'pickaxe', tier: 0, drops: drop1('cobblestone') });
@@ -456,7 +460,7 @@ defBlock(B.GRAVEL, { name: 'gravel', label: 'Gravel', tex: { all: 'gravel' }, ha
 defBlock(B.GOLD_ORE, { name: 'gold_ore', label: 'Gold Ore', tex: { all: 'gold_ore' }, hard: 3, tool: 'pickaxe', tier: 2 });
 defBlock(B.IRON_ORE, { name: 'iron_ore', label: 'Iron Ore', tex: { all: 'iron_ore' }, hard: 3, tool: 'pickaxe', tier: 1 });
 defBlock(B.COAL_ORE, { name: 'coal_ore', label: 'Coal Ore', tex: { all: 'coal_ore' }, hard: 3, tool: 'pickaxe', tier: 0, drops: drop1('coal'), xp: [0, 2] });
-defBlock(B.LOG, { name: 'log', label: 'Oak Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'log' }, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
+defBlock(B.LOG, { name: 'log', label: 'Oak Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'log' }, pillar: true, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
 defBlock(B.LEAVES, { name: 'leaves', label: 'Oak Leaves', tex: { all: 'leaves' }, opaque: false, cutout: true, leaves: true, hard: 0.2, sound: 'grass', opacity: 1, flammable: true, tint: 'foliage',
   drops: rng => { const d = []; if (rng.chance(0.05)) d.push({ id: 'sapling', n: 1 }); if (rng.chance(0.005)) d.push({ id: 'apple', n: 1 }); return d; } });
 defBlock(B.GLASS, { name: 'glass', label: 'Glass', tex: { all: 'glass' }, opaque: false, cutout: true, hard: 0.3, sound: 'glass', drops: () => [] });
@@ -482,7 +486,10 @@ defBlock(B.WHEAT_CROP, { name: 'wheat_crop', label: 'Crops', tex: { all: 'wheat'
 defBlock(B.FURNACE, { name: 'furnace', label: 'Furnace', tex: { top: 'furnace_top', bottom: 'furnace_top', side: 'furnace_side', front: 'furnace_front' }, hard: 3.5, tool: 'pickaxe', tier: 0 });
 defBlock(B.FURNACE_LIT, { name: 'furnace_lit', label: 'Furnace', tex: { top: 'furnace_top', bottom: 'furnace_top', side: 'furnace_side', front: 'furnace_front_lit' }, hard: 3.5, tool: 'pickaxe', tier: 0, lum: 13, drops: drop1('furnace') });
 defBlock(B.REDSTONE_ORE, { name: 'redstone_ore', label: 'Redstone Ore', tex: { all: 'redstone_ore' }, hard: 3, tool: 'pickaxe', tier: 2, drops: rng => [{ id: 'redstone', n: rng.irange(4, 5) }], xp: [1, 5] });
-defBlock(B.SNOW_LAYER, { name: 'snow_layer', label: 'Snow', tex: { all: 'snow' }, model: 'layer', solid: false, opaque: false, hard: 0.1, tool: 'shovel', sound: 'snow', drops: () => [], replaceable: true });
+// snow: data 0-7 = layers-1. Renders (data+1)*2px tall, collides (data)*2px (a single layer has no
+// collision, you walk straight through it — vanilla). Stacks up to 8 layers = a full block.
+defBlock(B.SNOW_LAYER, { name: 'snow_layer', label: 'Snow', tex: { all: 'snow' }, model: 'layer', opaque: false, hard: 0.1, tool: 'shovel', sound: 'snow', replaceable: true,
+  drops: (rng, tier, tool, data) => [{ id: 'snow_layer', n: (data & 7) + 1 }] });
 defBlock(B.ICE, { name: 'ice', label: 'Ice', tex: { all: 'ice' }, translucent: true, opaque: false, opacity: 2, hard: 0.5, tool: 'pickaxe', sound: 'glass', slippery: true, drops: () => [] });
 defBlock(B.CACTUS, { name: 'cactus', label: 'Cactus', tex: { top: 'cactus_top', bottom: 'cactus_bottom', side: 'cactus_side' }, model: 'cactus', opaque: false, hard: 0.4, sound: 'cloth' });
 defBlock(B.NETHERRACK, { name: 'netherrack', label: 'Netherrack', tex: { all: 'netherrack' }, hard: 0.4, tool: 'pickaxe', tier: 0 });
@@ -493,14 +500,16 @@ defBlock(B.NETHER_BRICK, { name: 'nether_brick', label: 'Nether Brick', tex: { a
 defBlock(B.END_STONE, { name: 'end_stone', label: 'End Stone', tex: { all: 'end_stone' }, hard: 3, tool: 'pickaxe', tier: 0 });
 defBlock(B.END_PORTAL_FRAME, { name: 'end_portal_frame', label: 'End Portal Frame', tex: { top: 'endframe_top', bottom: 'end_stone', side: 'endframe_side' }, model: 'frame', opaque: false, hard: -1, lum: 1, drops: () => [] });
 defBlock(B.END_PORTAL, { name: 'end_portal', label: 'End Portal', tex: { all: 'end_portal' }, model: 'endportal', solid: false, opaque: false, hard: -1, lum: 15, drops: () => [] });
-defBlock(B.SPRUCE_LOG, { name: 'spruce_log', label: 'Spruce Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'spruce_log' }, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
+defBlock(B.SPRUCE_LOG, { name: 'spruce_log', label: 'Spruce Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'spruce_log' }, pillar: true, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
 defBlock(B.SPRUCE_LEAVES, { name: 'spruce_leaves', label: 'Spruce Leaves', tex: { all: 'spruce_leaves' }, opaque: false, cutout: true, leaves: true, hard: 0.2, sound: 'grass', opacity: 1, flammable: true,
   drops: rng => rng.chance(0.05) ? [{ id: 'sapling', n: 1 }] : [] });
-defBlock(B.BIRCH_LOG, { name: 'birch_log', label: 'Birch Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'birch_log' }, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
+defBlock(B.BIRCH_LOG, { name: 'birch_log', label: 'Birch Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'birch_log' }, pillar: true, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
 defBlock(B.BIRCH_LEAVES, { name: 'birch_leaves', label: 'Birch Leaves', tex: { all: 'birch_leaves' }, opaque: false, cutout: true, leaves: true, hard: 0.2, sound: 'grass', opacity: 1, flammable: true,
   drops: rng => rng.chance(0.05) ? [{ id: 'sapling', n: 1 }] : [] });
 defBlock(B.TALL_GRASS, { name: 'tall_grass', label: 'Grass', tex: { all: 'tall_grass' }, model: 'cross', solid: false, hard: 0, sound: 'grass', cutout: true, tint: 'grass', replaceable: true,
   drops: rng => rng.chance(0.125) ? [{ id: 'seeds', n: 1 }] : [] });
+// door: data bit0 = upper half, bits1-2 = facing, bit3 = open, bit4 = hinge on the right
+// (right-hinged doors swing the other way, so a pair side by side opens like vanilla double doors)
 defBlock(B.DOOR, { name: 'door', label: 'Wooden Door', tex: { all: 'door_lower' }, model: 'door', opaque: false, hard: 3, tool: 'axe', sound: 'wood', drops: drop1('door') });
 defBlock(B.BED, { name: 'bed', label: 'Bed', tex: { all: 'bed' }, model: 'bed', opaque: false, hard: 0.2, sound: 'wood', drops: drop1('bed') });
 defBlock(B.STONE_BRICKS, { name: 'stone_bricks', label: 'Stone Bricks', tex: { all: 'stone_bricks' }, hard: 1.5, tool: 'pickaxe', tier: 0 });
@@ -511,14 +520,14 @@ defBlock(B.GOLD_BLOCK, { name: 'gold_block', label: 'Block of Gold', tex: { all:
 defBlock(B.DIAMOND_BLOCK, { name: 'diamond_block', label: 'Block of Diamond', tex: { all: 'diamond_block' }, hard: 5, tool: 'pickaxe', tier: 2 });
 defBlock(B.DRAGON_EGG, { name: 'dragon_egg', label: 'Dragon Egg', tex: { all: 'dragon_egg' }, model: 'egg', opaque: false, hard: 3, lum: 1, drops: drop1('dragon_egg') });
 defBlock(B.GRASS_SNOW, { name: 'grass_snow', label: 'Grass Block', tex: { top: 'snow', bottom: 'dirt', side: 'grass_side_snow' }, hard: 0.6, tool: 'shovel', sound: 'grass', drops: drop1('dirt') });
-// slabs (bottom half; opaque:false + opacity:15 like farmland so light/culling stay correct)
-defBlock(B.OAK_SLAB, { name: 'oak_slab', label: 'Oak Wood Slab', tex: { all: 'planks' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
-defBlock(B.COBBLE_SLAB, { name: 'cobblestone_slab', label: 'Cobblestone Slab', tex: { all: 'cobblestone' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0 });
-defBlock(B.STONE_SLAB, { name: 'stone_slab', label: 'Stone Slab', tex: { all: 'stone' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0 });
-defBlock(B.STONE_BRICK_SLAB, { name: 'stone_brick_slab', label: 'Stone Brick Slab', tex: { all: 'stone_bricks' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0 });
-defBlock(B.SANDSTONE_SLAB, { name: 'sandstone_slab', label: 'Sandstone Slab', tex: { top: 'sandstone_top', bottom: 'sandstone_bottom', side: 'sandstone' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0 });
-defBlock(B.NETHER_BRICK_SLAB, { name: 'nether_brick_slab', label: 'Nether Brick Slab', tex: { all: 'nether_brick' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0 });
-// stairs (data = facing of the tall back side: 0:-z 1:+x 2:+z 3:-x)
+// slabs (data bit0 = top half, bit1 = double/full block; opaque:false + opacity:15 like farmland so light/culling stay correct)
+defBlock(B.OAK_SLAB, { name: 'oak_slab', label: 'Oak Wood Slab', tex: { all: 'planks' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'axe', sound: 'wood', flammable: true, drops: dropSlab('oak_slab') });
+defBlock(B.COBBLE_SLAB, { name: 'cobblestone_slab', label: 'Cobblestone Slab', tex: { all: 'cobblestone' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0, drops: dropSlab('cobblestone_slab') });
+defBlock(B.STONE_SLAB, { name: 'stone_slab', label: 'Stone Slab', tex: { all: 'stone' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0, drops: dropSlab('stone_slab') });
+defBlock(B.STONE_BRICK_SLAB, { name: 'stone_brick_slab', label: 'Stone Brick Slab', tex: { all: 'stone_bricks' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0, drops: dropSlab('stone_brick_slab') });
+defBlock(B.SANDSTONE_SLAB, { name: 'sandstone_slab', label: 'Sandstone Slab', tex: { top: 'sandstone_top', bottom: 'sandstone_bottom', side: 'sandstone' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0, drops: dropSlab('sandstone_slab') });
+defBlock(B.NETHER_BRICK_SLAB, { name: 'nether_brick_slab', label: 'Nether Brick Slab', tex: { all: 'nether_brick' }, model: 'slab', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0, drops: dropSlab('nether_brick_slab') });
+// stairs (data bits0-1 = facing of the tall side: 0:-z 1:+x 2:+z 3:-x, bit2 = upside-down; corner shape is derived from neighbours)
 defBlock(B.OAK_STAIRS, { name: 'oak_stairs', label: 'Oak Wood Stairs', tex: { all: 'planks' }, model: 'stairs', opaque: false, opacity: 15, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
 defBlock(B.COBBLE_STAIRS, { name: 'cobblestone_stairs', label: 'Cobblestone Stairs', tex: { all: 'cobblestone' }, model: 'stairs', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0 });
 defBlock(B.STONE_BRICK_STAIRS, { name: 'stone_brick_stairs', label: 'Stone Brick Stairs', tex: { all: 'stone_bricks' }, model: 'stairs', opaque: false, opacity: 15, hard: 1.5, tool: 'pickaxe', tier: 0 });
@@ -526,6 +535,12 @@ defBlock(B.SANDSTONE_STAIRS, { name: 'sandstone_stairs', label: 'Sandstone Stair
 defBlock(B.NETHER_BRICK_STAIRS, { name: 'nether_brick_stairs', label: 'Nether Brick Stairs', tex: { all: 'nether_brick' }, model: 'stairs', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0 });
 // fence (1.5-block-tall collision like vanilla, connects to neighbors at mesh time)
 defBlock(B.FENCE, { name: 'fence', label: 'Oak Fence', tex: { all: 'planks' }, model: 'fence', opaque: false, opacity: 0, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
+// trapdoor: data bits0-1 = facing (the face you clicked, i.e. away from the wall it hangs on),
+// bit2 = top half, bit3 = open. Open it lies flat against that wall; closed it's a 3px lid.
+defBlock(B.TRAPDOOR, { name: 'trapdoor', label: 'Wooden Trapdoor', tex: { all: 'trapdoor' }, model: 'trapdoor', opaque: false, hard: 3, tool: 'axe', sound: 'wood', flammable: true });
+// fence gate: data bits0-1 = facing (the way it swings open), bit2 = open. 1.5 tall like a fence,
+// no collision at all while open. Fences and gates connect to each other.
+defBlock(B.FENCE_GATE, { name: 'fence_gate', label: 'Oak Fence Gate', tex: { all: 'planks' }, model: 'gate', opaque: false, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
 // ladder (data = face normal away from the wall it hangs on: 0:-z 1:+x 2:+z 3:-x)
 defBlock(B.LADDER, { name: 'ladder', label: 'Ladder', tex: { all: 'ladder' }, model: 'ladder', solid: false, opaque: false, hard: 0.4, tool: 'axe', sound: 'wood', cutout: true });
 // rail (data = shape: 0 NS,1 EW,2-5 ascend E/W/N/S,6-9 curves SE/SW/NW/NE)
@@ -557,10 +572,62 @@ defBlock(B.REPEATER, { name: 'repeater', label: 'Redstone Repeater', tex: { all:
 defBlock(B.REDSTONE_TORCH, { name: 'redstone_torch', label: 'Redstone Torch', tex: { all: 'redstone_torch' }, model: 'torch', solid: false, opaque: false, hard: 0, lum: 7, sound: 'wood', cutout: true });
 defBlock(B.REDSTONE_TORCH_OFF, { name: 'redstone_torch_off', label: 'Redstone Torch', tex: { all: 'redstone_torch_off' }, model: 'torch', solid: false, opaque: false, hard: 0, sound: 'wood', cutout: true, drops: drop1('redstone_torch') });
 
-// blocks a torch/flower can sit on, etc.
-function blockSolidTop(id) {
+// ---------- slab / stairs shapes (shared by mesher, collision and selection) ----------
+// A slab's data: bit0 = top half, bit1 = double (fills the whole cube).
+// horizontal footprint [x0,z0,x1,z1] of the tall half, per stair facing (0:-z 1:+x 2:+z 3:-x)
+const STAIR_HALF = [[0, 0, 1, 0.5], [0.5, 0, 1, 1], [0, 0.5, 1, 1], [0, 0, 0.5, 1]];
+const STAIR_OFF = [[0, -1], [1, 0], [0, 1], [-1, 0]]; // step from a facing
+// stairs data at a position, or -1 if that block isn't stairs
+function stairDataAt(world, x, y, z) {
+  const d = Blocks[world.getBlock(x, y, z)];
+  return d && d.model === 'stairs' ? world.getData(x, y, z) : -1;
+}
+function stairBoxAnd(a, b) {
+  return [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])];
+}
+// vanilla canTakeShape: a corner is refused when the block on that side is a stair
+// with the same facing+half (it's part of a straight run, so the corner would look wrong)
+function stairFreeSide(world, x, y, z, data) {
+  const nd = stairDataAt(world, x, y, z);
+  return nd < 0 || (nd & 3) !== (data & 3) || (nd & 4) !== (data & 4);
+}
+// Vanilla StairBlock.getStairsShape — a stair turns into a corner piece when the stair in
+// front of it (facing dir) or behind it runs on the perpendicular axis at the same half.
+// Returns { facing, top, shape, boxes } where boxes are the footprints of the tall half:
+//   straight → one half, outer → one quarter, inner → the half plus the opposite quarter (L).
+function stairShape(world, x, y, z, data) {
+  const facing = data & 3, top = (data & 4) !== 0;
+  let o = STAIR_OFF[facing];
+  let nd = stairDataAt(world, x + o[0], y, z + o[1]);
+  if (nd >= 0 && (nd & 4) === (data & 4)) {
+    const nf = nd & 3;
+    if ((nf & 1) !== (facing & 1)) { // perpendicular
+      const b = STAIR_OFF[(nf + 2) & 3];
+      if (stairFreeSide(world, x + b[0], y, z + b[1], data))
+        return { facing, top, shape: 'outer', boxes: [stairBoxAnd(STAIR_HALF[facing], STAIR_HALF[nf])] };
+    }
+  }
+  o = STAIR_OFF[(facing + 2) & 3];
+  nd = stairDataAt(world, x + o[0], y, z + o[1]);
+  if (nd >= 0 && (nd & 4) === (data & 4)) {
+    const nf = nd & 3;
+    if ((nf & 1) !== (facing & 1)) {
+      const f = STAIR_OFF[nf];
+      if (stairFreeSide(world, x + f[0], y, z + f[1], data))
+        return { facing, top, shape: 'inner', boxes: [STAIR_HALF[facing], stairBoxAnd(STAIR_HALF[(facing + 2) & 3], STAIR_HALF[nf])] };
+    }
+  }
+  return { facing, top, shape: 'straight', boxes: [STAIR_HALF[facing]] };
+}
+
+// blocks a torch/flower can sit on, etc. — top slabs, double slabs and upside-down stairs
+// have a full top face, so they count too (data is optional; 0 = bottom half)
+function blockSolidTop(id, data = 0) {
   const d = Blocks[id];
-  return d && d.solid && (d.model === 'cube' || d.model === 'soulsand' || d.model === 'farmland' || d.model === 'piston');
+  if (!d || !d.solid) return false;
+  if (d.model === 'slab') return (data & 3) !== 0;
+  if (d.model === 'stairs') return (data & 4) !== 0;
+  return d.model === 'cube' || d.model === 'soulsand' || d.model === 'farmland' || d.model === 'piston';
 }
 // mining time in seconds
 function blockBreakTime(id, heldItem) {
@@ -745,6 +812,10 @@ recipe('sandstone_stairs', 4, ['S  ', 'SS ', 'SSS'], { S: 'sandstone' });
 recipe('nether_brick_stairs', 4, ['N  ', 'NN ', 'NNN'], { N: 'nether_brick' });
 // fence: 4 planks + 2 sticks → 3 (minecraft.wiki/w/Fence)
 recipe('fence', 3, ['PSP', 'PSP'], { P: ANY_PLANK, S: 'stick' });
+// fence gate: 4 sticks + 2 planks → 1 (minecraft.wiki/w/Fence_Gate)
+recipe('fence_gate', 1, ['SPS', 'SPS'], { P: ANY_PLANK, S: 'stick' });
+// trapdoor: 6 planks → 2 (minecraft.wiki/w/Trapdoor)
+recipe('trapdoor', 2, ['PPP', 'PPP'], { P: ANY_PLANK });
 // ladder: 7 sticks → 3 (minecraft.wiki/w/Ladder)
 recipe('ladder', 3, ['S S', 'SSS', 'S S'], { S: 'stick' });
 // bone meal: 1 bone → 3 (minecraft.wiki/w/Bone_Meal)
@@ -834,7 +905,7 @@ function fuelTicks(id) {
   if (!it) return 0;
   if (it.fuel) return it.fuel;
   if (id === 'planks' || id === 'crafting_table' || id === 'chest' || id === 'log' || id === 'spruce_log' || id === 'birch_log') return 300;
-  if (id === 'fence' || id === 'oak_stairs' || id === 'ladder') return 300;
+  if (id === 'fence' || id === 'fence_gate' || id === 'oak_stairs' || id === 'ladder' || id === 'trapdoor') return 300;
   if (id === 'oak_slab') return 150;
   if (id === 'sapling') return 100;
   if (it.toolType && ['wooden_pickaxe', 'wooden_axe', 'wooden_shovel', 'wooden_sword', 'wooden_hoe'].includes(id)) return 200;
@@ -1582,6 +1653,23 @@ function buildBlockTextures() {
       if (y === 9 || y === 13 || x === 3 || x === 12 || x === 7 || x === 8) s(x, y, [116, 88, 48]);
     }
   }
+  T.reg('trapdoor', (s, r) => {
+    // vertical boards held together by two cross battens with iron nails (vanilla-ish oak trapdoor)
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      let c = mixc([152, 120, 70], [128, 100, 58], r.next() * 0.45);
+      if (x % 4 === 0) c = [112, 86, 48];                       // board seam
+      if (x % 4 === 1) c = mixc([164, 132, 80], c, 0.35);       // lit edge of each board
+      if (x === 0 || x === 15 || y === 0 || y === 15) c = [98, 74, 40];
+      s(x, y, c);
+    }
+    for (const by of [2, 11]) for (let x = 1; x < 15; x++) for (let y = by; y < by + 3; y++) {
+      let c = mixc([140, 110, 64], [120, 94, 52], r.next() * 0.4);
+      if (y === by) c = [166, 134, 82];                         // batten highlight
+      if (y === by + 2) c = [102, 78, 42];                      // shadow under the batten
+      s(x, y, c);
+    }
+    for (const [nx, ny] of [[2, 3], [13, 3], [2, 12], [13, 12]]) s(nx, ny, [96, 96, 104]);
+  });
   T.reg('bed_top_head', (s, r) => {
     for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
       let c;
@@ -2469,6 +2557,37 @@ function buildIcons() {
     c.fillRect(3, 2, 1, 14); c.fillRect(12, 2, 1, 14);
     return cv;
   }
+  // gate icon: two posts with the bars held between them (a fence icon runs its bars edge to edge)
+  function gateIcon() {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 16;
+    const c = cv.getContext('2d');
+    const post = '#a2824e', dark = '#6b552f', lite = '#bd9b62';
+    c.fillStyle = dark;
+    c.fillRect(1, 1, 4, 14); c.fillRect(11, 1, 4, 14);
+    c.fillRect(4, 4, 8, 4); c.fillRect(4, 9, 8, 4);
+    c.fillStyle = post;
+    c.fillRect(2, 2, 2, 13); c.fillRect(12, 2, 2, 13);
+    c.fillRect(4, 4, 8, 3); c.fillRect(4, 9, 8, 3);
+    c.fillStyle = lite;
+    c.fillRect(2, 2, 1, 13); c.fillRect(12, 2, 1, 13);
+    c.fillRect(4, 4, 8, 1); c.fillRect(4, 9, 8, 1);
+    return cv;
+  }
+  // trapdoor icon: the panel seen from above with a bit of thickness, so it reads as a lid
+  function trapdoorIcon() {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 16;
+    const c = cv.getContext('2d');
+    c.imageSmoothingEnabled = false;
+    c.fillStyle = '#6b552f'; // 3px of edge under the two front sides
+    c.beginPath(); c.moveTo(1, 6.4); c.lineTo(8, 10.8); c.lineTo(8, 13.8); c.lineTo(1, 9.4); c.closePath(); c.fill();
+    c.fillStyle = '#5a4728';
+    c.beginPath(); c.moveTo(15, 6.4); c.lineTo(8, 10.8); c.lineTo(8, 13.8); c.lineTo(15, 9.4); c.closePath(); c.fill();
+    c.save();
+    c.setTransform(0.4375, 0.275, -0.4375, 0.275, 8, 2.1);
+    c.drawImage(tileCanvas('trapdoor'), 0, 0);
+    c.restore();
+    return cv;
+  }
   const GRASS_ICON_TINT = [145, 189, 89], FOLIAGE_ICON_TINT = [119, 171, 47];
   for (const bd of Blocks) {
     if (!bd || bd.id === B.AIR || !Items[bd.name]) continue;
@@ -2478,6 +2597,8 @@ function buildIcons() {
       icon = bd.tint === 'grass' ? tintCopy(bd.tex.all, GRASS_ICON_TINT) : tileCanvas(bd.tex.all);
     } else if (bd.id === B.DOOR) icon = doorIcon();
     else if (bd.id === B.BED) icon = bedIcon();
+    else if (bd.model === 'trapdoor') icon = trapdoorIcon();
+    else if (bd.model === 'gate') icon = gateIcon();
     else if (bd.model === 'fence') icon = fenceIcon();
     else {
       const t = bd.tex.top || bd.tex.all, sd = bd.tex.side || bd.tex.all, fr = bd.tex.front || sd;
@@ -3539,7 +3660,7 @@ class World {
     if (id === B.AIR) return;
     const below = this.getBlock(x, y - 1, z);
     const needsGround = [B.SAPLING, B.DANDELION, B.POPPY, B.TALL_GRASS, B.MUSHROOM_BROWN, B.MUSHROOM_RED, B.SNOW_LAYER];
-    if (needsGround.includes(id) && !blockSolidTop(below)) return this.breakBlock(x, y, z, null, true);
+    if (needsGround.includes(id) && !blockSolidTop(below, this.getData(x, y - 1, z))) return this.breakBlock(x, y, z, null, true);
     if (id === B.WHEAT_CROP && below !== B.FARMLAND) return this.breakBlock(x, y, z, null, true);
     if (id === B.RAIL && !Blocks[below].solid) return this.breakBlock(x, y, z, null, true); // rails can't levitate
     if ((id === B.SAND || id === B.GRAVEL) && !Blocks[below].solid && y > 0) {
@@ -3558,7 +3679,7 @@ class World {
     }
     if (id === B.DOOR) {
       const d = this.getData(x, y, z);
-      if (!(d & 1) && !blockSolidTop(below)) return this.breakBlock(x, y, z, null, true);
+      if (!(d & 1) && !blockSolidTop(below, this.getData(x, y - 1, z))) return this.breakBlock(x, y, z, null, true);
     }
     if (id === B.LADDER) {
       // wall block is opposite the face normal stored in data
@@ -3568,7 +3689,7 @@ class World {
       if (!sup || !sup.opaque || sup.model !== 'cube') return this.breakBlock(x, y, z, null, true);
     }
     if (id === B.REDSTONE_WIRE || id === B.PRESSURE_PLATE || id === B.REPEATER) {
-      if (!blockSolidTop(below)) return this.breakBlock(x, y, z, null, true);
+      if (!blockSolidTop(below, this.getData(x, y - 1, z))) return this.breakBlock(x, y, z, null, true);
     }
     if (id === B.LEVER || id === B.STONE_BUTTON) {
       // mount face: 0 floor(below), 1:-x 2:+x 3:-z 4:+z, 5 ceiling(above)
@@ -3840,6 +3961,15 @@ class World {
       const ly = (d & 1) === 1 ? y - 1 : y; // lower half
       const on = this.redstonePowerTo(x, ly, z) > 0 || this.redstonePowerTo(x, ly + 1, z) > 0;
       if (this.openDoor(x, ly, z, on) && typeof Sfx !== 'undefined') Sfx.play('doorToggle', { pos: [x, y, z] });
+    } else if (id === B.TRAPDOOR || id === B.FENCE_GATE) {
+      // both open on redstone like vanilla (trapdoor uses bit 8, gate bit 4)
+      const bit = id === B.TRAPDOOR ? 8 : 4;
+      const d = this.getData(x, y, z);
+      const on = this.redstonePowerTo(x, y, z) > 0;
+      if (on !== ((d & bit) !== 0)) {
+        this.setBlock(x, y, z, id, on ? (d | bit) : (d & ~bit), { noUpdate: true });
+        if (typeof Sfx !== 'undefined') Sfx.play('doorToggle', { pos: [x, y, z] });
+      }
     } else if (id === B.PISTON || id === B.STICKY_PISTON) {
       const powered = this.redstonePowerTo(x, y, z) > 0;
       const extended = (this.getData(x, y, z) & 8) !== 0;
@@ -4163,6 +4293,8 @@ class World {
     if (!def || !def.solid) return null;
     switch (def.model) {
       case 'cube': return [x, y, z, x + 1, y + 1, z + 1];
+      // snow: one layer is walk-through, every layer above that is 2px of collision
+      case 'layer': { const d = this.getData(x, y, z) & 7; return d === 0 ? null : [x, y, z, x + 1, y + d * 0.125, z + 1]; }
       case 'soulsand': return [x, y, z, x + 1, y + 0.875, z + 1];
       case 'farmland': return [x, y, z, x + 1, y + 0.9375, z + 1];
       case 'chest': return [x + 0.0625, y, z + 0.0625, x + 0.9375, y + 0.875, z + 0.9375];
@@ -4170,22 +4302,22 @@ class World {
       case 'bed': return [x, y, z, x + 1, y + 0.5625, z + 1];
       case 'frame': return [x, y, z, x + 1, y + 0.8125, z + 1];
       case 'egg': return [x + 0.06, y, z + 0.06, x + 0.94, y + 1, z + 0.94];
-      case 'slab': return [x, y, z, x + 1, y + 0.5, z + 1];
-      case 'stairs': {
-        const facing = this.getData(x, y, z) & 3;
-        const boxes = [[x, y, z, x + 1, y + 0.5, z + 1]];
-        if (facing === 0) boxes.push([x, y + 0.5, z, x + 1, y + 1, z + 0.5]);
-        else if (facing === 2) boxes.push([x, y + 0.5, z + 0.5, x + 1, y + 1, z + 1]);
-        else if (facing === 1) boxes.push([x + 0.5, y + 0.5, z, x + 1, y + 1, z + 1]);
-        else boxes.push([x, y + 0.5, z, x + 0.5, y + 1, z + 1]);
-        return boxes;
+      case 'slab': return this.slabBox(x, y, z);
+      case 'stairs': return this.stairBoxes(x, y, z);
+      case 'trapdoor': return this.trapdoorBox(x, y, z);
+      case 'gate': {
+        const d = this.getData(x, y, z);
+        if (d & 4) return null; // open — walk straight through
+        const t = 0.125; // 4px thick wall, 1.5 tall like the fence
+        return (d & 1) ? [x + 0.5 - t, y, z, x + 0.5 + t, y + 1.5, z + 1]
+          : [x, y, z + 0.5 - t, x + 1, y + 1.5, z + 0.5 + t];
       }
       case 'fence': {
         // 1.5-tall like vanilla; extend toward connected neighbors
         const boxes = [[x + 0.375, y, z + 0.375, x + 0.625, y + 1.5, z + 0.625]];
         const conn = (dx, dz) => {
           const nd = Blocks[this.getBlock(x + dx, y, z + dz)];
-          return nd && (nd.model === 'fence' || (nd.opaque && nd.model === 'cube'));
+          return nd && (nd.model === 'fence' || nd.model === 'gate' || (nd.opaque && nd.model === 'cube'));
         };
         if (conn(0, -1)) boxes.push([x + 0.375, y, z, x + 0.625, y + 1.5, z + 0.375]);
         if (conn(0, 1)) boxes.push([x + 0.375, y, z + 0.625, x + 0.625, y + 1.5, z + 1]);
@@ -4197,7 +4329,7 @@ class World {
         const d = this.getData(x, y, z);
         const facing = (d >> 1) & 3, open = (d & 8) !== 0;
         const t = 0.1875;
-        let side = open ? (facing + 1) % 4 : facing;
+        const side = open ? (facing + ((d & 16) ? 1 : 3)) % 4 : facing;
         // door plate on 'side' edge: 0:-z 1:+x 2:+z 3:-x
         if (side === 0) return [x, y, z, x + 1, y + 1, z + t];
         if (side === 1) return [x + 1 - t, y, z, x + 1, y + 1, z + 1];
@@ -4206,6 +4338,32 @@ class World {
       }
       default: return [x, y, z, x + 1, y + 1, z + 1];
     }
+  }
+  // slab box: bottom half, top half or the whole cube when doubled
+  slabBox(x, y, z) {
+    const d = this.getData(x, y, z);
+    if (d & 2) return [x, y, z, x + 1, y + 1, z + 1];
+    return (d & 1) ? [x, y + 0.5, z, x + 1, y + 1, z + 1] : [x, y, z, x + 1, y + 0.5, z + 1];
+  }
+  // trapdoor: a 3px lid at the top or bottom, or flat against the wall it hangs on when open
+  trapdoorBox(x, y, z) {
+    const d = this.getData(x, y, z), t = 0.1875;
+    if (d & 8) {
+      const f = d & 3; // open plate sits on the side opposite `facing`
+      if (f === 0) return [x, y, z + 1 - t, x + 1, y + 1, z + 1];
+      if (f === 2) return [x, y, z, x + 1, y + 1, z + t];
+      if (f === 1) return [x, y, z, x + t, y + 1, z + 1];
+      return [x + 1 - t, y, z, x + 1, y + 1, z + 1];
+    }
+    return (d & 4) ? [x, y + 1 - t, z, x + 1, y + 1, z + 1] : [x, y, z, x + 1, y + t, z + 1];
+  }
+  // stairs: the full-width half plus the step box(es) of the derived corner shape
+  stairBoxes(x, y, z) {
+    const sh = stairShape(this, x, y, z, this.getData(x, y, z));
+    const boxes = sh.top ? [[x, y + 0.5, z, x + 1, y + 1, z + 1]] : [[x, y, z, x + 1, y + 0.5, z + 1]];
+    const by0 = sh.top ? y : y + 0.5, by1 = sh.top ? y + 0.5 : y + 1;
+    for (const b of sh.boxes) boxes.push([x + b[0], by0, z + b[1], x + b[2], by1, z + b[3]]);
+    return boxes;
   }
   getSelectBox(x, y, z) {
     const id = this.getBlock(x, y, z);
@@ -4219,10 +4377,16 @@ class World {
         if (d === 0) return [x + 0.4, y, z + 0.4, x + 0.6, y + 0.62, z + 0.6];
         return [x + 0.25, y + 0.2, z + 0.25, x + 0.75, y + 0.85, z + 0.75];
       }
-      case 'layer': return [x, y, z, x + 1, y + 0.125, z + 1];
-      case 'slab': return [x, y, z, x + 1, y + 0.5, z + 1];
-      case 'stairs': return [x, y, z, x + 1, y + 1, z + 1];
+      case 'layer': return [x, y, z, x + 1, y + (((this.getData(x, y, z) & 7) + 1) * 0.125), z + 1];
+      case 'slab': return this.slabBox(x, y, z);
+      case 'stairs': return this.stairBoxes(x, y, z);
       case 'fence': return [x + 0.3125, y, z + 0.3125, x + 0.6875, y + 1, z + 0.6875];
+      case 'trapdoor': return this.trapdoorBox(x, y, z);
+      case 'gate': {
+        // same outline open or closed (vanilla) — only the collision goes away when it's open
+        const zAxis = (this.getData(x, y, z) & 1) === 0;
+        return zAxis ? [x, y, z + 0.375, x + 1, y + 1, z + 0.625] : [x + 0.375, y, z, x + 0.625, y + 1, z + 1];
+      }
       case 'ladder': {
         const d = this.getData(x, y, z) & 3;
         const t = 0.125;
@@ -4266,9 +4430,14 @@ class World {
     for (let i = 0; i < 200; i++) {
       const box = this.getSelectBox(x, y, z);
       if (box) {
-        // precise ray-box for partial blocks
-        const hit = rayBox(ox, oy, oz, dx, dy, dz, box);
-        if (hit && hit.t <= maxDist) {
+        // precise ray-box for partial blocks; shapes made of several boxes (stairs, fences)
+        // take the nearest one that is hit
+        let hit = null;
+        for (const b of (Array.isArray(box[0]) ? box : [box])) {
+          const h = rayBox(ox, oy, oz, dx, dy, dz, b);
+          if (h && h.t <= maxDist && (!hit || h.t < hit.t)) hit = h;
+        }
+        if (hit) {
           return { x, y, z, face: hit.face, t: hit.t, px: ox + dx * hit.t, py: oy + dy * hit.t, pz: oz + dz * hit.t };
         }
       }
@@ -4705,7 +4874,7 @@ const Mesher = {
           case 'cross': this.emitCross(world, chunk, def, x, y, z, lx, lz); break;
           case 'crop': this.emitCrop(world, def, x, y, z, data); break;
           case 'torch': this.emitTorch(world, def, x, y, z, data); break;
-          case 'layer': this.emitBox(world, def, x, y, z, 0, 0, 0, 1, 0.125, 1); break;
+          case 'layer': this.emitSubBox(world, def, x, y, z, 0, 0, 0, 1, ((data & 7) + 1) * 0.125, 1); break;
           case 'soulsand': case 'farmland': this.emitCube(world, chunk, def, x, y, z, data, lx, lz, 1); break;
           case 'chest': this.emitBox(world, def, x, y, z, 0.0625, 0, 0.0625, 0.9375, 0.875, 0.9375, data); break;
           case 'cactus': this.emitBox(world, def, x, y, z, 0.0625, 0, 0.0625, 0.9375, 1, 0.9375); break;
@@ -4716,9 +4885,11 @@ const Mesher = {
           case 'bed': this.emitBed(world, def, x, y, z, data); break;
           case 'egg': this.emitBox(world, def, x, y, z, 0.06, 0, 0.06, 0.94, 1, 0.94); break;
           case 'fire': this.emitFire(world, def, x, y, z); break;
-          case 'slab': this.emitSubBox(world, def, x, y, z, 0, 0, 0, 1, 0.5, 1, { data }); break;
+          case 'slab': this.emitSlab(world, def, x, y, z, data); break;
           case 'stairs': this.emitStairs(world, def, x, y, z, data); break;
           case 'fence': this.emitFence(world, def, x, y, z); break;
+          case 'trapdoor': this.emitTrapdoor(world, def, x, y, z, data); break;
+          case 'gate': this.emitGate(world, def, x, y, z, data); break;
           case 'ladder': this.emitLadder(world, def, x, y, z, data); break;
           case 'rail': this.emitRail(world, def, x, y, z, data); break;
           case 'wire': this.emitWire(world, def, x, y, z, data); break;
@@ -4740,6 +4911,12 @@ const Mesher = {
   texFor(def, face, data) {
     const t = def.tex;
     if (t.all) return t.all;
+    if (def.pillar) {
+      // logs: the two faces on the axis show the rings, the rest shows bark
+      const axis = data & 3;
+      const end = axis === 1 ? (face === 1 || face === 3) : axis === 2 ? (face === 0 || face === 2) : (face === 4 || face === 5);
+      return end ? (t.top || t.side) : t.side;
+    }
     if (face === 4) return t.top || t.side;
     if (face === 5) return t.bottom || t.side;
     if (t.front !== undefined) {
@@ -4780,10 +4957,17 @@ const Mesher = {
       let tint = null;
       if (def.tintTop === 'grass' && f === 4) tint = [chunk.tintG[(lx * 16 + lz) * 3] / 255, chunk.tintG[(lx * 16 + lz) * 3 + 1] / 255, chunk.tintG[(lx * 16 + lz) * 3 + 2] / 255];
       else if (def.tint === 'foliage') tint = [chunk.tintF[(lx * 16 + lz) * 3] / 255, chunk.tintF[(lx * 16 + lz) * 3 + 1] / 255, chunk.tintF[(lx * 16 + lz) * 3 + 2] / 255];
-      this.emitFace(world, def, x, y, z, f, this.texFor(def, f, data), tint, def.leaves);
+      // logs lying on their side: turn the bark 90° so the grain follows the axis
+      let rot = 0;
+      if (def.pillar) {
+        const axis = data & 3;
+        if (axis === 1) rot = (f === 1 || f === 3) ? 0 : 1;
+        else if (axis === 2) rot = (f === 1 || f === 3) ? 1 : 0;
+      }
+      this.emitFace(world, def, x, y, z, f, this.texFor(def, f, data), tint, def.leaves, rot);
     }
   },
-  emitFace(world, def, x, y, z, f, texName, tint, noAO) {
+  emitFace(world, def, x, y, z, f, texName, tint, noAO, rot = 0) {
     const n = FACE_N[f];
     const [u0, v0] = this.uvRect(texName);
     const shade = FACE_SHADE[f];
@@ -4791,7 +4975,7 @@ const Mesher = {
     const fullBright = def.lum >= 14;
     for (let ci = 0; ci < 4; ci++) {
       const cv = FACE_V[f][ci];
-      const uv = FACE_UV[f][ci];
+      const uv = FACE_UV[f][(ci + rot) & 3];
       let sky, blk, ao;
       if (noAO) {
         sky = world.getSky(x + n[0], y + n[1], z + n[2]) / 15;
@@ -4833,7 +5017,9 @@ const Mesher = {
       if (i === 3 && s1 && s2) continue; // corner occluded
       const c = cells[i];
       const d = Blocks[world.getBlock(c[0], c[1], c[2])];
-      if (d && d.opaque) continue;
+      // skip cells that hold no light at all (opaque cubes, but also partial blocks like slabs
+      // and stairs with opacity 15) — averaging their 0 in would smear a dark halo around them
+      if (d && (d.opaque || d.opacity >= 15)) continue;
       const l = world.getLightPacked(c[0], c[1], c[2]);
       sky += l >> 4; blk += l & 15; cnt++;
     }
@@ -4848,6 +5034,17 @@ const Mesher = {
     if (faceDir >= 0) { sx += FACE_N[faceDir][0]; sy += FACE_N[faceDir][1]; sz += FACE_N[faceDir][2]; }
     let l = world.getLightPacked(sx, sy, sz);
     if ((l >> 4) === 0 && (l & 15) === 0) l = world.getLightPacked(x, y, z);
+    if ((l >> 4) === 0 && (l & 15) === 0) {
+      // face sits inside/against solid geometry (e.g. the underside of a top slab or a stair
+      // riser facing a wall) — light it from the brightest neighbour instead of pitch black
+      let bs = 0, bb = 0;
+      for (const n of FACE_N) {
+        const p = world.getLightPacked(x + n[0], y + n[1], z + n[2]);
+        if ((p >> 4) > bs) bs = p >> 4;
+        if ((p & 15) > bb) bb = p & 15;
+      }
+      l = (bs << 4) | bb;
+    }
     let sky = (l >> 4) / 15, blk = (l & 15) / 15;
     if (def.lum >= 11) blk = 1;
     const shade = (faceDir >= 0 ? FACE_SHADE[faceDir] : 0.95) * (opts.shade || 1);
@@ -4885,8 +5082,10 @@ const Mesher = {
       const flush = (f === 0 && z0 === 0) || (f === 1 && x1 === 1) || (f === 2 && z1 === 1) || (f === 3 && x0 === 0) || (f === 4 && y1 === 1) || (f === 5 && y0 === 0);
       if (flush) {
         const n = FACE_N[f];
-        const nd = Blocks[world.getBlock(x + n[0], y + n[1], z + n[2])];
+        const nx = x + n[0], ny = y + n[1], nz = z + n[2];
+        const nd = Blocks[world.getBlock(nx, ny, nz)];
         if (nd && nd.opaque) continue;
+        if (nd && nd.model === 'slab' && (world.getData(nx, ny, nz) & 2)) continue; // double slab = full cube
       }
       const P = FACE_V[f].map(cv => [x + (cv[0] === 1 ? x1 : x0), y + (cv[1] === 1 ? y1 : y0), z + (cv[2] === 1 ? z1 : z0)]);
       let uvs;
@@ -4896,22 +5095,72 @@ const Mesher = {
       this.litQuad(world, def, P, this.texFor(def, f, opts.data || 0), uvs, f, x, y, z);
     }
   },
+  // horizontal quad at height y+yy covering [x0,z0]..[x1,z1]; f = 4 (up) or 5 (down)
+  emitHalfFace(world, def, x, y, z, x0, z0, x1, z1, yy, f, data) {
+    const P = FACE_V[f].map(cv => [x + (cv[0] === 1 ? x1 : x0), y + yy, z + (cv[2] === 1 ? z1 : z0)]);
+    const uvs = FACE_V[f].map(cv => [cv[0] === 1 ? x1 : x0, cv[2] === 1 ? z1 : z0]);
+    this.litQuad(world, def, P, this.texFor(def, f, data), uvs, f, x, y, z);
+  },
+  emitSlab(world, def, x, y, z, data) {
+    if (data & 2) this.emitSubBox(world, def, x, y, z, 0, 0, 0, 1, 1, 1, { data });      // double
+    else if (data & 1) this.emitSubBox(world, def, x, y, z, 0, 0.5, 0, 1, 1, 1, { data }); // top half
+    else this.emitSubBox(world, def, x, y, z, 0, 0, 0, 1, 0.5, 1, { data });               // bottom half
+  },
   emitStairs(world, def, x, y, z, data) {
-    const facing = data & 3; // tall back side: 0:-z 1:+x 2:+z 3:-x
-    // lower slab (top face drawn separately over the exposed step only)
-    this.emitSubBox(world, def, x, y, z, 0, 0, 0, 1, 0.5, 1, { data, skip: [4] });
-    // upper back box
-    let bx0 = 0, bz0 = 0, bx1 = 1, bz1 = 1;
-    if (facing === 0) bz1 = 0.5; else if (facing === 2) bz0 = 0.5;
-    else if (facing === 1) bx0 = 0.5; else bx1 = 0.5;
-    this.emitSubBox(world, def, x, y, z, bx0, 0.5, bz0, bx1, 1, bz1, { data, skip: [5] });
-    // exposed half of the step top
-    let tx0 = 0, tz0 = 0, tx1 = 1, tz1 = 1;
-    if (facing === 0) tz0 = 0.5; else if (facing === 2) tz1 = 0.5;
-    else if (facing === 1) tx1 = 0.5; else tx0 = 0.5;
-    const P = FACE_V[4].map(cv => [x + (cv[0] === 1 ? tx1 : tx0), y + 0.5, z + (cv[2] === 1 ? tz1 : tz0)]);
-    const uvs = FACE_V[4].map(cv => [cv[0] === 1 ? tx1 : tx0, cv[2] === 1 ? tz1 : tz0]);
-    this.litQuad(world, def, P, this.texFor(def, 4, data), uvs, 4, x, y, z);
+    const sh = stairShape(world, x, y, z, data);
+    const top = sh.top;
+    // full-width half (the "slab" part): top half when upside-down. Its inner face is drawn
+    // per-quarter below, over the parts the step boxes don't cover.
+    this.emitSubBox(world, def, x, y, z, 0, top ? 0.5 : 0, 0, 1, top ? 1 : 0.5, 1, { data, skip: [top ? 5 : 4] });
+    // step box(es) on the other half — one for straight/outer, two (L) for an inner corner
+    const by0 = top ? 0 : 0.5, by1 = top ? 0.5 : 1;
+    for (let i = 0; i < sh.boxes.length; i++) {
+      const b = sh.boxes[i];
+      const skip = [top ? 4 : 5];
+      if (i === 1) skip.push(sh.facing); // inner-corner quarter sits against the main step box
+      this.emitSubBox(world, def, x, y, z, b[0], by0, b[1], b[2], by1, b[3], { data, skip });
+    }
+    // the quarters of the mid plane the step doesn't stand on (walkable step surface)
+    const f = top ? 5 : 4;
+    for (const q of [[0, 0, 0.5, 0.5], [0.5, 0, 1, 0.5], [0, 0.5, 0.5, 1], [0.5, 0.5, 1, 1]]) {
+      const cx = (q[0] + q[2]) / 2, cz = (q[1] + q[3]) / 2;
+      let covered = false;
+      for (const b of sh.boxes) if (cx > b[0] && cx < b[2] && cz > b[1] && cz < b[3]) { covered = true; break; }
+      if (!covered) this.emitHalfFace(world, def, x, y, z, q[0], q[1], q[2], q[3], 0.5, f, data);
+    }
+  },
+  emitTrapdoor(world, def, x, y, z, data) {
+    const t = 0.1875, f = data & 3;
+    if (data & 8) { // open: swung flat against the wall on the far side of `facing`
+      if (f === 0) this.emitSubBox(world, def, x, y, z, 0, 0, 1 - t, 1, 1, 1, { data });
+      else if (f === 2) this.emitSubBox(world, def, x, y, z, 0, 0, 0, 1, 1, t, { data });
+      else if (f === 1) this.emitSubBox(world, def, x, y, z, 0, 0, 0, t, 1, 1, { data });
+      else this.emitSubBox(world, def, x, y, z, 1 - t, 0, 0, 1, 1, 1, { data });
+    } else if (data & 4) this.emitSubBox(world, def, x, y, z, 0, 1 - t, 0, 1, 1, 1, { data });
+    else this.emitSubBox(world, def, x, y, z, 0, 0, 0, 1, t, 1, { data });
+  },
+  emitGate(world, def, x, y, z, data) {
+    const f = data & 3, open = (data & 4) !== 0;
+    const zAxis = (f & 1) === 0; // wall spans x, thickness in z
+    // u runs along the wall, v across it — so one set of boxes covers both orientations
+    const box = (u0, v0, u1, v1, y0, y1) => zAxis
+      ? this.emitSubBox(world, def, x, y, z, u0, y0, v0, u1, y1, v1, { data })
+      : this.emitSubBox(world, def, x, y, z, v0, y0, u0, v1, y1, u1, { data });
+    const s = 1 / 16;
+    box(0, 6 * s, 2 * s, 10 * s, 5 * s, 1);        // post
+    box(14 * s, 6 * s, 1, 10 * s, 5 * s, 1);       // post
+    if (open) {
+      // both leaves swing toward `facing`, i.e. away from whoever opened it
+      const plus = (f === 1 || f === 2);
+      const v0 = plus ? 8 * s : 2 * s, v1 = plus ? 14 * s : 8 * s;
+      for (const [a, b] of [[0, 2 * s], [14 * s, 1]]) {
+        box(a, v0, b, v1, 6 * s, 9 * s);
+        box(a, v0, b, v1, 12 * s, 15 * s);
+      }
+    } else {
+      box(2 * s, 7 * s, 14 * s, 9 * s, 6 * s, 9 * s);
+      box(2 * s, 7 * s, 14 * s, 9 * s, 12 * s, 15 * s);
+    }
   },
   emitFence(world, def, x, y, z) {
     // center post
@@ -4919,7 +5168,7 @@ const Mesher = {
     // rails toward fences / solid neighbors
     const conn = (dx, dz) => {
       const nd = Blocks[world.getBlock(x + dx, y, z + dz)];
-      return nd && (nd.model === 'fence' || (nd.opaque && nd.model === 'cube'));
+      return nd && (nd.model === 'fence' || nd.model === 'gate' || (nd.opaque && nd.model === 'cube'));
     };
     const rail = (x0, z0, x1, z1) => {
       this.emitSubBox(world, def, x, y, z, x0, 12 / 16, z0, x1, 15 / 16, z1);
@@ -5211,7 +5460,9 @@ const Mesher = {
     const upper = (data & 1) === 1;
     const facing = (data >> 1) & 3, open = (data & 8) !== 0;
     const t = 0.1875;
-    let side = open ? (facing + 1) % 4 : facing;
+    // the leaf folds onto its hinge side: left hinge → swings left, right hinge → right,
+    // so two doors side by side open away from each other like a vanilla double door
+    const side = open ? (facing + ((data & 16) ? 1 : 3)) % 4 : facing;
     let x0 = 0, z0 = 0, x1 = 1, z1 = 1;
     if (side === 0) z1 = t; else if (side === 1) x0 = 1 - t; else if (side === 2) z0 = 1 - t; else x1 = t;
     const tex = upper ? 'door_upper' : 'door_lower';
@@ -7275,7 +7526,8 @@ class FallingBlock extends Entity {
     this.physics(dt);
     if (this.onGround) {
       const bx = floor(this.x), by = Math.round(this.y), bz = floor(this.z);
-      if (this.world.getBlock(bx, by, bz) === B.AIR || !Blocks[this.world.getBlock(bx, by, bz)].solid) {
+      const land = Blocks[this.world.getBlock(bx, by, bz)];
+      if (this.world.getBlock(bx, by, bz) === B.AIR || !land.solid || land.replaceable) {
         this.world.setBlock(bx, by, bz, this.blockId, this.data);
       } else {
         spawnItemEntity(this.world, this.x, this.y + 0.5, this.z, mkStack(Blocks[this.blockId].name, 1), true);
@@ -9329,6 +9581,20 @@ class Player {
       Sfx.play('doorToggle', { pos: [hit.x, hit.y, hit.z] });
       return true;
     }
+    if (id === B.TRAPDOOR) {
+      const d = w.getData(hit.x, hit.y, hit.z);
+      w.setBlock(hit.x, hit.y, hit.z, B.TRAPDOOR, d ^ 8, { noUpdate: true });
+      Sfx.play('doorToggle', { pos: [hit.x, hit.y, hit.z] });
+      return true;
+    }
+    if (id === B.FENCE_GATE) {
+      const d = w.getData(hit.x, hit.y, hit.z);
+      // opening: swing away from the player, like vanilla
+      const nd = (d & 4) ? (d & ~4) : (((d & 3) === ((this.getFacing() + 2) % 4) ? this.getFacing() : (d & 3)) | 4);
+      w.setBlock(hit.x, hit.y, hit.z, B.FENCE_GATE, nd, { noUpdate: true });
+      Sfx.play('doorToggle', { pos: [hit.x, hit.y, hit.z] });
+      return true;
+    }
     if (id === B.BED) {
       g.trySleep(hit.x, hit.y, hit.z);
       return true;
@@ -9430,7 +9696,7 @@ class Player {
     // redstone dust → lay wire on top of a solid block
     if (held.id === 'redstone') {
       const bx = hit.x + FACE_N[hit.face][0], by = hit.y + FACE_N[hit.face][1], bz = hit.z + FACE_N[hit.face][2];
-      if (w.getBlock(bx, by, bz) === B.AIR && blockSolidTop(w.getBlock(bx, by - 1, bz))) {
+      if (w.getBlock(bx, by, bz) === B.AIR && blockSolidTop(w.getBlock(bx, by - 1, bz), w.getData(bx, by - 1, bz))) {
         w.setBlock(bx, by, bz, B.REDSTONE_WIRE, 0);
         this.consumeHeld();
         Sfx.play('place_stone', { pos: [bx, by, bz] });
@@ -9502,6 +9768,30 @@ class Player {
   placeBlock(held, it, hit) {
     const w = this.world;
     const targetId = w.getBlock(hit.x, hit.y, hit.z);
+    const bid = it.block;
+    const bdef = Blocks[bid];
+    // vanilla slab merge: aiming at the open half of a matching slab fills it into a double slab
+    if (bdef.model === 'slab' && targetId === bid) {
+      const td = w.getData(hit.x, hit.y, hit.z);
+      const above = hit.py - hit.y > 0.5;
+      const fills = (td & 2) ? false
+        : (td & 1) ? (hit.face === 5 || (hit.face < 4 && !above))
+          : (hit.face === 4 || (hit.face < 4 && above));
+      if (fills) {
+        w.setBlock(hit.x, hit.y, hit.z, bid, (td & 1) | 2);
+        this.afterPlace(held, bdef, hit.x, hit.y, hit.z);
+        return;
+      }
+    }
+    // snow stacks layer by layer (up to 8 = a full block), like vanilla
+    if (bid === B.SNOW_LAYER && targetId === B.SNOW_LAYER) {
+      const td = w.getData(hit.x, hit.y, hit.z) & 7;
+      if (td < 7) {
+        w.setBlock(hit.x, hit.y, hit.z, bid, td + 1);
+        this.afterPlace(held, bdef, hit.x, hit.y, hit.z);
+      }
+      return;
+    }
     let px = hit.x, py = hit.y, pz = hit.z;
     const replaceable = Blocks[targetId] && Blocks[targetId].replaceable;
     if (!replaceable) {
@@ -9510,11 +9800,18 @@ class Player {
     const curId = w.getBlock(px, py, pz);
     const cur = Blocks[curId];
     if (curId !== B.AIR && !(cur && cur.replaceable) && curId !== B.WATER && curId !== B.LAVA) return;
-    const bid = it.block;
-    const bdef = Blocks[bid];
-    // player collision check
+    // slabs/stairs/trapdoors: bottom face → top half, side face → the half you aimed at (vanilla)
+    const topHalf = (bdef.model === 'slab' || bdef.model === 'stairs' || bdef.model === 'trapdoor')
+      && (hit.face === 5 || (hit.face !== 4 && hit.py - py > 0.5));
+    // player collision check — against the shape that will actually be there, so a slab, a snow
+    // layer or a trapdoor can still go down at your feet
     if (bdef.solid) {
-      const bb = [px, py, pz, px + 1, py + 1, pz + 1];
+      const bb = bdef.model === 'slab'
+        ? (topHalf ? [px, py + 0.5, pz, px + 1, py + 1, pz + 1] : [px, py, pz, px + 1, py + 0.5, pz + 1])
+        : bdef.model === 'layer' ? [px, py, pz, px + 1, py + 0.125, pz + 1]
+          : bdef.model === 'trapdoor'
+            ? (topHalf ? [px, py + 0.8125, pz, px + 1, py + 1, pz + 1] : [px, py, pz, px + 1, py + 0.1875, pz + 1])
+            : [px, py, pz, px + 1, py + 1, pz + 1];
       const p = this.aabb();
       if (p.x + p.w / 2 > bb[0] && p.x - p.w / 2 < bb[3] && p.y + p.h > bb[1] && p.y < bb[4] && p.z + p.w / 2 > bb[2] && p.z - p.w / 2 < bb[5]) return;
       // entity collision
@@ -9534,7 +9831,7 @@ class Player {
         // wall attach: face 1 (+x normal): attached block is at -x → data 1
         data = { 1: 1, 3: 2, 2: 3, 0: 4 }[hit.face];
       }
-      if (data === 0 && !blockSolidTop(w.getBlock(px, py - 1, pz))) return;
+      if (data === 0 && !blockSolidTop(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz))) return;
     }
     if (bid === B.SAPLING || bid === B.DANDELION || bid === B.POPPY || bid === B.MUSHROOM_BROWN || bid === B.MUSHROOM_RED) {
       const below = w.getBlock(px, py - 1, pz);
@@ -9549,7 +9846,16 @@ class Player {
     }
     if (bid === B.FURNACE || bid === B.CHEST || bid === B.CRAFTING_TABLE) data = (facing + 2) % 4;
     if (bid === B.PISTON || bid === B.STICKY_PISTON) data = this.getFacing6(); // head points where you look
-    if (bdef.model === 'stairs') data = facing; // tall side away from the player, like vanilla
+    if (bdef.pillar) data = [2, 1, 2, 1, 0, 0][hit.face]; // logs: axis of the face you built against
+    if (bid === B.TRAPDOOR) {
+      // clicked a wall → hinge on that wall, half from where you aimed; clicked a floor/ceiling →
+      // hinge on the far side from you, bottom when placed on top of a block (vanilla)
+      if (hit.face < 4) data = hit.face | ((hit.py - py > 0.5) ? 4 : 0);
+      else data = ((facing + 2) % 4) | (hit.face === 4 ? 0 : 4);
+    }
+    if (bid === B.FENCE_GATE) data = facing;
+    if (bdef.model === 'stairs') data = facing | (topHalf ? 4 : 0); // tall side away from the player, like vanilla
+    if (bdef.model === 'slab') data = topHalf ? 1 : 0;
     if (bid === B.LADDER) {
       if (hit.face > 3) return; // side faces only
       const wall = Blocks[w.getBlock(px - FACE_N[hit.face][0], py, pz - FACE_N[hit.face][2])];
@@ -9568,24 +9874,32 @@ class Player {
       data = mf;
     }
     if (bid === B.PRESSURE_PLATE) {
-      if (!blockSolidTop(w.getBlock(px, py - 1, pz))) return;
+      if (!blockSolidTop(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz))) return;
     }
     if (bid === B.REPEATER) {
-      if (!blockSolidTop(w.getBlock(px, py - 1, pz))) return;
+      if (!blockSolidTop(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz))) return;
       data = facing; // output points where the player looks; delay starts at 1 tick
     }
     if (bid === B.DOOR) {
-      if (!blockSolidTop(w.getBlock(px, py - 1, pz))) return;
+      if (!blockSolidTop(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz))) return;
       if (w.getBlock(px, py + 1, pz) !== B.AIR) return;
-      w.setBlock(px, py, pz, B.DOOR, 0 | (facing << 1));
-      w.setBlock(px, py + 1, pz, B.DOOR, 1 | (facing << 1));
+      // hinge (vanilla): mirror a door already standing next to this one, otherwise put the
+      // hinge on the side of the block you clicked — so two doors side by side act as one pair
+      const L = [[0, -1], [1, 0], [0, 1], [-1, 0]][(facing + 3) % 4]; // player's left
+      const doorAt = (dx, dz) => w.getBlock(px + dx, py, pz + dz) === B.DOOR && ((w.getData(px + dx, py, pz + dz) >> 1) & 3) === facing;
+      let hinge;
+      if (doorAt(L[0], L[1])) hinge = 16;              // door on our left → hinge right
+      else if (doorAt(-L[0], -L[1])) hinge = 0;        // door on our right → hinge left
+      else hinge = ((hit.px - px - 0.5) * L[0] + (hit.pz - pz - 0.5) * L[1]) > 0 ? 0 : 16;
+      w.setBlock(px, py, pz, B.DOOR, 0 | (facing << 1) | hinge);
+      w.setBlock(px, py + 1, pz, B.DOOR, 1 | (facing << 1) | hinge);
       this.afterPlace(held, bdef, px, py, pz);
       return;
     }
     if (bid === B.BED) {
       const [fx, fz] = [[0, -1], [1, 0], [0, 1], [-1, 0]][facing];
       const hx = px + fx, hz = pz + fz;
-      if (!blockSolidTop(w.getBlock(px, py - 1, pz)) || !blockSolidTop(w.getBlock(hx, py - 1, hz))) return;
+      if (!blockSolidTop(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz)) || !blockSolidTop(w.getBlock(hx, py - 1, hz), w.getData(hx, py - 1, hz))) return;
       const hId = w.getBlock(hx, py, hz);
       if (hId !== B.AIR && !(Blocks[hId] && Blocks[hId].replaceable)) return;
       w.setBlock(px, py, pz, B.BED, facing << 1);
@@ -14323,7 +14637,7 @@ const Game = {
       const hit = w.raycast(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], 4.5);
       if (hit) {
         const box = w.getSelectBox(hit.x, hit.y, hit.z);
-        if (box) Renderer.drawSelection(box);
+        if (box) for (const b of (Array.isArray(box[0]) ? box : [box])) Renderer.drawSelection(b);
         if (p.mining && p.mining.x === hit.x && p.mining.y === hit.y && p.mining.z === hit.z) {
           const stage = clamp(floor(p.mining.progress * 10), 0, 9);
           Renderer.drawCrack(hit.x, hit.y, hit.z, stage, w);
