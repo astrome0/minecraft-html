@@ -414,7 +414,7 @@ const B = {
   PISTON: 85, STICKY_PISTON: 86, PISTON_HEAD: 87,
   REDSTONE_BLOCK: 88, REPEATER: 89,
   REDSTONE_TORCH: 90, REDSTONE_TORCH_OFF: 91,
-  TRAPDOOR: 92, FENCE_GATE: 93,
+  TRAPDOOR: 92, FENCE_GATE: 93, GLASS_PANE: 94,
 };
 
 // def fields:
@@ -535,6 +535,8 @@ defBlock(B.SANDSTONE_STAIRS, { name: 'sandstone_stairs', label: 'Sandstone Stair
 defBlock(B.NETHER_BRICK_STAIRS, { name: 'nether_brick_stairs', label: 'Nether Brick Stairs', tex: { all: 'nether_brick' }, model: 'stairs', opaque: false, opacity: 15, hard: 2, tool: 'pickaxe', tier: 0 });
 // fence (1.5-block-tall collision like vanilla, connects to neighbors at mesh time)
 defBlock(B.FENCE, { name: 'fence', label: 'Oak Fence', tex: { all: 'planks' }, model: 'fence', opaque: false, opacity: 0, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
+// glass pane: no data — connects to panes and full blocks like a fence, 2px thin
+defBlock(B.GLASS_PANE, { name: 'glass_pane', label: 'Glass Pane', tex: { all: 'glass' }, model: 'pane', opaque: false, cutout: true, hard: 0.3, sound: 'glass', drops: () => [] });
 // trapdoor: data bits0-1 = facing (the face you clicked, i.e. away from the wall it hangs on),
 // bit2 = top half, bit3 = open. Open it lies flat against that wall; closed it's a 3px lid.
 defBlock(B.TRAPDOOR, { name: 'trapdoor', label: 'Wooden Trapdoor', tex: { all: 'trapdoor' }, model: 'trapdoor', opaque: false, hard: 3, tool: 'axe', sound: 'wood', flammable: true });
@@ -618,6 +620,15 @@ function stairShape(world, x, y, z, data) {
     }
   }
   return { facing, top, shape: 'straight', boxes: [STAIR_HALF[facing]] };
+}
+
+// glass panes join to other panes and to full solid blocks (vanilla), N/E/S/W
+function paneConnects(world, x, y, z) {
+  const c = (dx, dz) => {
+    const nd = Blocks[world.getBlock(x + dx, y, z + dz)];
+    return !!(nd && (nd.model === 'pane' || (nd.opaque && nd.model === 'cube')));
+  };
+  return [c(0, -1), c(1, 0), c(0, 1), c(-1, 0)];
 }
 
 // blocks a torch/flower can sit on, etc. — top slabs, double slabs and upside-down stairs
@@ -816,6 +827,8 @@ recipe('fence', 3, ['PSP', 'PSP'], { P: ANY_PLANK, S: 'stick' });
 recipe('fence_gate', 1, ['SPS', 'SPS'], { P: ANY_PLANK, S: 'stick' });
 // trapdoor: 6 planks → 2 (minecraft.wiki/w/Trapdoor)
 recipe('trapdoor', 2, ['PPP', 'PPP'], { P: ANY_PLANK });
+// glass pane: 6 glass → 16 (minecraft.wiki/w/Glass_Pane)
+recipe('glass_pane', 16, ['GGG', 'GGG'], { G: 'glass' });
 // ladder: 7 sticks → 3 (minecraft.wiki/w/Ladder)
 recipe('ladder', 3, ['S S', 'SSS', 'S S'], { S: 'stick' });
 // bone meal: 1 bone → 3 (minecraft.wiki/w/Bone_Meal)
@@ -1310,6 +1323,30 @@ function buildBlockTextures() {
     for (let y = 4; y < 9; y++) for (let x = 7; x < 9; x++) s(x, y, [140, 140, 140]);
     s(7, 8, [80, 80, 80]); s(8, 8, [80, 80, 80]); s(7, 4, [180, 180, 180]); s(8, 4, [180, 180, 180]);
   });
+  // halves of a large chest: `open` says which edge is the joint — that edge loses its dark
+  // frame (so the two blocks read as one box) and the front carries half of the shared latch
+  const chestHalf = (s, r, open) => {
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      let edge = x === 0 || y === 0 || x === 15 || y === 15;
+      if (open === 'l' && x === 15) edge = (y === 0 || y === 15);
+      if (open === 'r' && x === 0) edge = (y === 0 || y === 15);
+      let c = mixc([146, 110, 63], [125, 92, 50], ((y % 5) === 4) ? 0.8 : r.next() * 0.35);
+      if (edge) c = [66, 49, 25];
+      s(x, y, c);
+    }
+  };
+  for (const side of ['l', 'r']) {
+    const x0 = side === 'r' ? 0 : 1, x1 = side === 'l' ? 16 : 15;
+    T.reg('chest_top_' + side, (s, r) => chestHalf(s, r, side));
+    T.reg('chest_side_' + side, (s, r) => { chestHalf(s, r, side); for (let x = x0; x < x1; x++) s(x, 6, [96, 70, 38]); });
+    T.reg('chest_front_' + side, (s, r) => {
+      chestHalf(s, r, side);
+      for (let x = x0; x < x1; x++) s(x, 6, [96, 70, 38]);
+      const lx = side === 'l' ? 14 : 0; // half the latch, sitting on the joint
+      for (let y = 4; y < 9; y++) for (let x = lx; x < lx + 2; x++) s(x, y, [140, 140, 140]);
+      s(lx, 8, [80, 80, 80]); s(lx + 1, 8, [80, 80, 80]); s(lx, 4, [180, 180, 180]); s(lx + 1, 4, [180, 180, 180]);
+    });
+  }
   T.reg('crafting_table_top', (s, r) => {
     for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
       let c = mixc([156, 127, 78], [131, 106, 61], r.next() * 0.4);
@@ -2593,7 +2630,7 @@ function buildIcons() {
     if (!bd || bd.id === B.AIR || !Items[bd.name]) continue;
     const it = Items[bd.name];
     let icon;
-    if (bd.model === 'cross' || bd.model === 'crop' || bd.model === 'torch' || bd.model === 'ladder' || bd.model === 'rail') {
+    if (bd.model === 'cross' || bd.model === 'crop' || bd.model === 'torch' || bd.model === 'ladder' || bd.model === 'rail' || bd.model === 'pane') {
       icon = bd.tint === 'grass' ? tintCopy(bd.tex.all, GRASS_ICON_TINT) : tileCanvas(bd.tex.all);
     } else if (bd.id === B.DOOR) icon = doorIcon();
     else if (bd.id === B.BED) icon = bedIcon();
@@ -3727,6 +3764,27 @@ class World {
     if (id === B.AIR) return;
     const data = this.getData(x, y, z);
     const def = Blocks[id];
+    // breaking half of a large chest: the surviving half keeps its own three rows (vanilla splits
+    // them the same way), the broken half's rows spill. Do this before the generic spill below.
+    if (id === B.CHEST && (data & 4)) {
+      const pair = this.chestPair(x, y, z);
+      if (pair) {
+        const [ox, oy, oz] = pair;
+        this.setBlock(ox, oy, oz, B.CHEST, this.getData(ox, oy, oz) & 3, { noUpdate: true }); // now single
+        const prim = this.chestPrimary(x, y, z);
+        const pk = prim[0] + ',' + prim[1] + ',' + prim[2];
+        const be = this.blockEntities.get(pk);
+        if (be && be.items) {
+          const mine = (prim[0] === x && prim[2] === z) ? be.items.slice(0, 27) : be.items.slice(27, 54);
+          const theirs = (prim[0] === x && prim[2] === z) ? be.items.slice(27, 54) : be.items.slice(0, 27);
+          while (theirs.length < 27) theirs.push(null);
+          this.blockEntities.delete(pk);
+          this.blockEntities.set(ox + ',' + oy + ',' + oz, { type: 'chest', x: ox, y: oy, z: oz, items: theirs });
+          while (mine.length < 27) mine.push(null);
+          this.blockEntities.set(x + ',' + y + ',' + z, { type: 'chest', x, y, z, items: mine });
+        }
+      }
+    }
     // container contents spill out (chest, furnace) — must run before setBlock deletes the BE
     const beSpill = this.blockEntities.get(x + ',' + y + ',' + z);
     // multiplayer: a guest's copy of a container can be stale, so it never spills —
@@ -4297,7 +4355,7 @@ class World {
       case 'layer': { const d = this.getData(x, y, z) & 7; return d === 0 ? null : [x, y, z, x + 1, y + d * 0.125, z + 1]; }
       case 'soulsand': return [x, y, z, x + 1, y + 0.875, z + 1];
       case 'farmland': return [x, y, z, x + 1, y + 0.9375, z + 1];
-      case 'chest': return [x + 0.0625, y, z + 0.0625, x + 0.9375, y + 0.875, z + 0.9375];
+      case 'chest': return this.chestBox(x, y, z);
       case 'cactus': return [x + 0.0625, y, z + 0.0625, x + 0.9375, y + 1, z + 0.9375];
       case 'bed': return [x, y, z, x + 1, y + 0.5625, z + 1];
       case 'frame': return [x, y, z, x + 1, y + 0.8125, z + 1];
@@ -4305,6 +4363,7 @@ class World {
       case 'slab': return this.slabBox(x, y, z);
       case 'stairs': return this.stairBoxes(x, y, z);
       case 'trapdoor': return this.trapdoorBox(x, y, z);
+      case 'pane': return this.paneBoxes(x, y, z);
       case 'gate': {
         const d = this.getData(x, y, z);
         if (d & 4) return null; // open — walk straight through
@@ -4345,6 +4404,44 @@ class World {
     if (d & 2) return [x, y, z, x + 1, y + 1, z + 1];
     return (d & 1) ? [x, y + 0.5, z, x + 1, y + 1, z + 1] : [x, y, z, x + 1, y + 0.5, z + 1];
   }
+  // glass pane: centre post plus an arm toward every neighbour it joins
+  paneBoxes(x, y, z) {
+    const c = paneConnects(this, x, y, z);
+    const a = 0.4375, b = 0.5625;
+    const boxes = [[x + a, y, z + a, x + b, y + 1, z + b]];
+    if (c[0]) boxes.push([x + a, y, z, x + b, y + 1, z + a]);
+    if (c[1]) boxes.push([x + b, y, z + a, x + 1, y + 1, z + b]);
+    if (c[2]) boxes.push([x + a, y, z + b, x + b, y + 1, z + 1]);
+    if (c[3]) boxes.push([x, y, z + a, x + a, y + 1, z + b]);
+    return boxes;
+  }
+  // ---------- chests ----------
+  // A pair is stored on both halves: bit2 = paired, bit3 = the partner sits toward facing+1
+  // (otherwise facing+3). The half with the lower coordinate holds the block entity for both.
+  chestPair(x, y, z) {
+    if (this.getBlock(x, y, z) !== B.CHEST) return null;
+    const d = this.getData(x, y, z);
+    if (!(d & 4)) return null;
+    const o = [[0, -1], [1, 0], [0, 1], [-1, 0]][((d & 3) + ((d & 8) ? 1 : 3)) % 4];
+    const nx = x + o[0], nz = z + o[1];
+    return this.getBlock(nx, y, nz) === B.CHEST ? [nx, y, nz] : null;
+  }
+  chestPrimary(x, y, z) {
+    const p = this.chestPair(x, y, z);
+    if (!p) return [x, y, z];
+    return (p[0] < x || p[2] < z) ? p : [x, y, z];
+  }
+  // half a chest is a 14/16 box; a paired half runs out to the shared edge so the two read as one
+  chestBox(x, y, z) {
+    const e = 0.0625;
+    let x0 = e, z0 = e, x1 = 1 - e, z1 = 1 - e;
+    const p = this.chestPair(x, y, z);
+    if (p) {
+      if (p[0] > x) x1 = 1; else if (p[0] < x) x0 = 0;
+      else if (p[2] > z) z1 = 1; else z0 = 0;
+    }
+    return [x + x0, y, z + z0, x + x1, y + 0.875, z + z1];
+  }
   // trapdoor: a 3px lid at the top or bottom, or flat against the wall it hangs on when open
   trapdoorBox(x, y, z) {
     const d = this.getData(x, y, z), t = 0.1875;
@@ -4382,6 +4479,12 @@ class World {
       case 'stairs': return this.stairBoxes(x, y, z);
       case 'fence': return [x + 0.3125, y, z + 0.3125, x + 0.6875, y + 1, z + 0.6875];
       case 'trapdoor': return this.trapdoorBox(x, y, z);
+      // one outline around the whole pane instead of the post and every arm separately
+      case 'pane': {
+        const c = paneConnects(this, x, y, z);
+        const a = 0.4375, b = 0.5625;
+        return [x + (c[3] ? 0 : a), y, z + (c[0] ? 0 : a), x + (c[1] ? 1 : b), y + 1, z + (c[2] ? 1 : b)];
+      }
       case 'gate': {
         // same outline open or closed (vanilla) — only the collision goes away when it's open
         const zAxis = (this.getData(x, y, z) & 1) === 0;
@@ -4876,7 +4979,7 @@ const Mesher = {
           case 'torch': this.emitTorch(world, def, x, y, z, data); break;
           case 'layer': this.emitSubBox(world, def, x, y, z, 0, 0, 0, 1, ((data & 7) + 1) * 0.125, 1); break;
           case 'soulsand': case 'farmland': this.emitCube(world, chunk, def, x, y, z, data, lx, lz, 1); break;
-          case 'chest': this.emitBox(world, def, x, y, z, 0.0625, 0, 0.0625, 0.9375, 0.875, 0.9375, data); break;
+          case 'chest': this.emitChest(world, def, x, y, z, data); break;
           case 'cactus': this.emitBox(world, def, x, y, z, 0.0625, 0, 0.0625, 0.9375, 1, 0.9375); break;
           case 'frame': this.emitFrame(world, def, x, y, z, data); break;
           case 'endportal': this.emitEndPortal(world, def, x, y, z); break;
@@ -4888,6 +4991,7 @@ const Mesher = {
           case 'slab': this.emitSlab(world, def, x, y, z, data); break;
           case 'stairs': this.emitStairs(world, def, x, y, z, data); break;
           case 'fence': this.emitFence(world, def, x, y, z); break;
+          case 'pane': this.emitPane(world, def, x, y, z); break;
           case 'trapdoor': this.emitTrapdoor(world, def, x, y, z, data); break;
           case 'gate': this.emitGate(world, def, x, y, z, data); break;
           case 'ladder': this.emitLadder(world, def, x, y, z, data); break;
@@ -5057,8 +5161,10 @@ const Mesher = {
     ]);
     this.quad(corners[0], corners[1], corners[2], corners[3], opts.water);
   },
-  emitBox(world, def, x, y, z, x0, y0, z0, x1, y1, z1, data) {
+  // texMap/rotMap (optional): per-face texture override and 90° UV turns — used by the large chest
+  emitBox(world, def, x, y, z, x0, y0, z0, x1, y1, z1, data, skip, texMap, rotMap) {
     for (let f = 0; f < 6; f++) {
+      if (skip && skip.includes(f)) continue;
       // cull only when box face flush with block edge and neighbor opaque
       const flush = (f === 0 && z0 === 0) || (f === 1 && x1 === 1) || (f === 2 && z1 === 1) || (f === 3 && x0 === 0) || (f === 4 && y1 === 1) || (f === 5 && y0 === 0);
       if (flush) {
@@ -5066,12 +5172,11 @@ const Mesher = {
         const nd = Blocks[world.getBlock(x + n[0], y + n[1], z + n[2])];
         if (nd && nd.opaque) continue;
       }
-      const pts = FACE_V[f].map(cv => [
-        x + (cv[0] ? x1 : x0) * 1 + (cv[0] ? 0 : 0), // placeholder replaced below
-      ]);
-      // build corners properly
       const P = FACE_V[f].map(cv => [x + (cv[0] === 1 ? x1 : x0), y + (cv[1] === 1 ? y1 : y0), z + (cv[2] === 1 ? z1 : z0)]);
-      this.litQuad(world, def, P, this.texFor(def, f, data || 0), FACE_UV[f], f, x, y, z);
+      const rot = (rotMap && rotMap[f]) || 0;
+      const uvs = rot ? FACE_UV[f].map((_, i) => FACE_UV[f][(i + rot) & 3]) : FACE_UV[f];
+      const tex = (texMap && texMap[f]) || this.texFor(def, f, data || 0);
+      this.litQuad(world, def, P, tex, uvs, f, x, y, z);
     }
   },
   // axis-aligned sub-box with UVs cropped to the box extent (no texture squash)
@@ -5128,6 +5233,55 @@ const Mesher = {
       for (const b of sh.boxes) if (cx > b[0] && cx < b[2] && cz > b[1] && cz < b[3]) { covered = true; break; }
       if (!covered) this.emitHalfFace(world, def, x, y, z, q[0], q[1], q[2], q[3], 0.5, f, data);
     }
+  },
+  // a paired chest reaches out to the shared edge and drops the face there, so the two
+  // halves look like one long chest instead of two boxes with a seam
+  emitChest(world, def, x, y, z, data) {
+    const e = 0.0625;
+    let x0 = e, z0 = e, x1 = 1 - e, z1 = 1 - e, skip = null, texMap = null, rotMap = null;
+    const p = world.chestPair(x, y, z);
+    if (p) {
+      const jx = p[0] - x, jz = p[2] - z; // toward the other half
+      if (jx > 0) { x1 = 1; skip = [1]; }
+      else if (jx < 0) { x0 = 0; skip = [3]; }
+      else if (jz > 0) { z1 = 1; skip = [2]; }
+      else { z0 = 0; skip = [0]; }
+      // every face that straddles the joint uses the half-texture whose open edge (and, on the
+      // front, half the latch) lands on it — so the pair looks like one chest, not two boxes
+      const U0 = [[-1, 0], [0, -1], [1, 0], [0, 1], [1, 0], [1, 0]]; // texture u direction per face
+      texMap = {}; rotMap = {};
+      for (let f = 0; f < 6; f++) {
+        let ux = U0[f][0], uz = U0[f][1], rot = 0;
+        if ((f === 4 || f === 5) && jz !== 0) { rot = 1; ux = 0; uz = f === 4 ? 1 : -1; } // turn the lid 90°
+        const dot = ux * jx + uz * jz;
+        if (dot === 0) continue;
+        const side = dot > 0 ? 'l' : 'r';
+        const base = f === (data & 3) ? 'chest_front_' : (f === 4 || f === 5) ? 'chest_top_' : 'chest_side_';
+        texMap[f] = base + side;
+        if (rot) rotMap[f] = rot;
+      }
+    }
+    this.emitBox(world, def, x, y, z, x0, 0, z0, x1, 0.875, z1, data, skip, texMap, rotMap);
+  },
+  emitPane(world, def, x, y, z) {
+    const c = paneConnects(world, x, y, z);
+    const a = 7 / 16, b = 9 / 16;
+    // centre post; its side faces are dropped where an arm covers them (no seams inside the glass)
+    const skip = [];
+    for (let f = 0; f < 4; f++) if (c[f]) skip.push(f);
+    // an arm that runs into another pane also drops its outer face, otherwise both panes draw
+    // a border there and the joint shows a doubled/one-sided edge
+    const isPane = (dx, dz) => { const nd = Blocks[world.getBlock(x + dx, y, z + dz)]; return !!(nd && nd.model === 'pane'); };
+    const arm = (f, dx, dz, x0, z0, x1, z1) => {
+      const s = [(f + 2) % 4];
+      if (isPane(dx, dz)) s.push(f);
+      this.emitSubBox(world, def, x, y, z, x0, 0, z0, x1, 1, z1, { skip: s });
+    };
+    this.emitSubBox(world, def, x, y, z, a, 0, a, b, 1, b, { skip });
+    if (c[0]) arm(0, 0, -1, a, 0, b, a);
+    if (c[1]) arm(1, 1, 0, b, a, 1, b);
+    if (c[2]) arm(2, 0, 1, a, b, b, 1);
+    if (c[3]) arm(3, -1, 0, 0, a, a, b);
   },
   emitTrapdoor(world, def, x, y, z, data) {
     const t = 0.1875, f = data & 3;
@@ -9545,12 +9699,17 @@ class Player {
       return true;
     }
     if (id === B.CHEST) {
-      const k = hit.x + ',' + hit.y + ',' + hit.z;
+      // a large chest keeps all 54 slots in the block entity of its lower half, so the
+      // container lock/sync in multiplayer still deals with exactly one block entity
+      const [cx, cy, cz] = w.chestPrimary(hit.x, hit.y, hit.z);
+      const large = !!w.chestPair(hit.x, hit.y, hit.z);
+      const k = cx + ',' + cy + ',' + cz;
       let be = w.blockEntities.get(k);
-      if (!be) { be = { type: 'chest', x: hit.x, y: hit.y, z: hit.z, items: new Array(27).fill(null) }; w.blockEntities.set(k, be); }
+      if (!be) { be = { type: 'chest', x: cx, y: cy, z: cz, items: new Array(large ? 54 : 27).fill(null) }; w.blockEntities.set(k, be); }
+      if (large) while (be.items.length < 54) be.items.push(null);
       if (!g.mpOpenContainer(be)) return true; // somebody else is in it
-      UI.openChest(be);
-      Sfx.play('chestOpen', { pos: [hit.x, hit.y, hit.z] });
+      UI.openChest(be, large);
+      Sfx.play('chestOpen', { pos: [cx, cy, cz] });
       return true;
     }
     if (id === B.LEVER) {
@@ -9845,6 +10004,20 @@ class Player {
       }
     }
     if (bid === B.FURNACE || bid === B.CHEST || bid === B.CRAFTING_TABLE) data = (facing + 2) % 4;
+    if (bid === B.CHEST) {
+      // pair up with a single chest beside us that faces the same way (vanilla large chest)
+      const f = data & 3;
+      for (const s of [1, 3]) {
+        const o = [[0, -1], [1, 0], [0, 1], [-1, 0]][(f + s) % 4];
+        const nx = px + o[0], nz = pz + o[1];
+        if (w.getBlock(nx, py, nz) !== B.CHEST) continue;
+        const nd = w.getData(nx, py, nz);
+        if ((nd & 3) !== f || (nd & 4)) continue; // different facing or already half of a pair
+        data |= 4 | (s === 1 ? 8 : 0);
+        w.setBlock(nx, py, nz, B.CHEST, f | 4 | (s === 1 ? 0 : 8), { noUpdate: true });
+        break;
+      }
+    }
     if (bid === B.PISTON || bid === B.STICKY_PISTON) data = this.getFacing6(); // head points where you look
     if (bdef.pillar) data = [2, 1, 2, 1, 0, 0][hit.face]; // logs: axis of the face you built against
     if (bid === B.TRAPDOOR) {
@@ -10489,7 +10662,7 @@ const UI = {
   },
   openCrafting() { this.screen = 'crafting'; this.craftSize = 3; Game.releasePointer(); },
   openFurnace(be) { this.screen = 'furnace'; this.furnaceBE = be; Game.releasePointer(); },
-  openChest(be) { this.screen = 'chest'; this.chestBE = be; Game.releasePointer(); },
+  openChest(be, large) { this.screen = 'chest'; this.chestBE = be; this.chestLarge = !!large; Game.releasePointer(); },
   closeScreen() {
     // creative: items are infinite, so just drop whatever is on the cursor
     if (this.screen === 'creative') {
@@ -10556,14 +10729,16 @@ const UI = {
       for (let r = 0; r < 3; r++) for (let c = 0; c < 9; c++) invSlot(9 + r * 9 + c, px + 8 + c * 18, py + 84 + r * 18);
       for (let c = 0; c < 9; c++) invSlot(c, px + 8 + c * 18, py + 142);
     } else if (this.screen === 'chest') {
-      const py = this.H() / 2 - 83;
+      const rows = this.chestLarge ? 6 : 3;
+      const py = this.H() / 2 - 83 - (rows - 3) * 9; // grow upward so the inventory stays put
       const be = this.chestBE;
-      for (let r = 0; r < 3; r++) for (let c = 0; c < 9; c++) {
+      for (let r = 0; r < rows; r++) for (let c = 0; c < 9; c++) {
         const idx = r * 9 + c;
         slots.push({ x: px + 8 + c * 18, y: py + 18 + r * 18, get: () => be.items[idx], set: v => be.items[idx] = v, kind: 'chest', idx });
       }
-      for (let r = 0; r < 3; r++) for (let c = 0; c < 9; c++) invSlot(9 + r * 9 + c, px + 8 + c * 18, py + 86 + r * 18);
-      for (let c = 0; c < 9; c++) invSlot(c, px + 8 + c * 18, py + 144);
+      const iy = py + 86 + (rows - 3) * 18;
+      for (let r = 0; r < 3; r++) for (let c = 0; c < 9; c++) invSlot(9 + r * 9 + c, px + 8 + c * 18, iy + r * 18);
+      for (let c = 0; c < 9; c++) invSlot(c, px + 8 + c * 18, iy + 58);
     } else if (this.screen === 'creative') {
       const py = this.H() / 2 - 86;
       const items = this.creativeItems || [];
@@ -10655,12 +10830,13 @@ const UI = {
         // to container or armor or hotbar↔inv
         if (this.screen === 'chest') {
           const be = this.chestBE;
+          const n = be.items.length;
           let left = cur.n;
-          for (let i = 0; i < 27 && left > 0; i++) {
+          for (let i = 0; i < n && left > 0; i++) {
             const t = be.items[i];
             if (t && t.id === cur.id && !t.dur && !cur.dur && t.n < stackMax(t)) { const take = Math.min(stackMax(t) - t.n, left); t.n += take; left -= take; }
           }
-          for (let i = 0; i < 27 && left > 0; i++) {
+          for (let i = 0; i < n && left > 0; i++) {
             if (!be.items[i]) { be.items[i] = { id: cur.id, n: left }; if (cur.dur !== undefined) be.items[i].dur = cur.dur; left = 0; }
           }
           if (left === 0) slot.set(null); else cur.n = left;
@@ -11217,10 +11393,13 @@ const UI = {
   },
   drawChest(game) {
     this.dimBg();
-    const px = this.W() / 2 - 88, py = this.H() / 2 - 83;
-    this.panel(px, py, 176, 166);
-    this.text(this.beSyncing ? 'Chest  (syncing...)' : 'Chest', px + 8, py + 7, '#404040', false);
-    this.text('Inventory', px + 8, py + 76, '#404040', false);
+    const rows = this.chestLarge ? 6 : 3;
+    const extra = (rows - 3) * 18;
+    const px = this.W() / 2 - 88, py = this.H() / 2 - 83 - (rows - 3) * 9;
+    this.panel(px, py, 176, 166 + extra);
+    const name = this.chestLarge ? 'Large Chest' : 'Chest';
+    this.text(this.beSyncing ? name + '  (syncing...)' : name, px + 8, py + 7, '#404040', false);
+    this.text('Inventory', px + 8, py + 76 + extra, '#404040', false);
     const slots = this.activeSlots();
     for (const s of slots) {
       this.slotBg(s.x - 1, s.y - 1);
