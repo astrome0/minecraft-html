@@ -430,7 +430,27 @@ const WOOL_COLORS = {
   0: { name: 'white', label: 'White', rgb: [237, 237, 237] },
   4: { name: 'yellow', label: 'Yellow', rgb: [225, 200, 40] },
   14: { name: 'red', label: 'Red', rgb: [175, 45, 40] },
+  15: { name: 'black', label: 'Black', rgb: [29, 28, 33] },
 };
+// colour name → rgb / display label, for anything dyed that isn't the wool block itself
+// (bed blankets, a tamed wolf's collar)
+const WOOL_RGB = {}, WOOL_LABEL = {};
+for (const c in WOOL_COLORS) {
+  WOOL_RGB[WOOL_COLORS[c].name] = WOOL_COLORS[c].rgb;
+  WOOL_LABEL[WOOL_COLORS[c].name] = WOOL_COLORS[c].label;
+}
+
+// ---- bed colours, shared by the mesher, the item defs, placement and the drop ----
+// Bed data: bit0 spare, bits1-2 = facing, bit3 = the head half, bits4-7 = an index into
+// BED_COLORS. Vanilla (1.12+) gives every colour its own block id; packing the colour into the
+// spare high nibble keeps it one block instead of sixteen, and index 0 is red so every bed
+// saved before colours existed still reads as the classic red bed.
+const BED_COLORS = ['red', 'white', 'yellow', 'black'];
+const BED_COLOR_IDX = {};
+for (let i = 0; i < BED_COLORS.length; i++) BED_COLOR_IDX[BED_COLORS[i]] = i;
+function bedColor(data) { return BED_COLORS[(data >> 4) & 15] || 'red'; }
+// the item a bed of this colour drops / is placed from — 'bed' stays the red one
+function bedItemFor(c) { return c === 'red' ? 'bed' : 'bed_' + c; }
 // what a flower pot can hold: data value → the plant it shows (0 = empty). `cube` = drawn
 // as a small box instead of a cross (cactus).
 const POTTED = {
@@ -544,7 +564,7 @@ defBlock(B.TALL_GRASS, { name: 'tall_grass', label: 'Grass', tex: { all: 'tall_g
 // door: data bit0 = upper half, bits1-2 = facing, bit3 = open, bit4 = hinge on the right
 // (right-hinged doors swing the other way, so a pair side by side opens like vanilla double doors)
 defBlock(B.DOOR, { name: 'door', label: 'Wooden Door', tex: { all: 'door_lower' }, model: 'door', opaque: false, hard: 3, tool: 'axe', sound: 'wood', drops: drop1('door') });
-defBlock(B.BED, { name: 'bed', label: 'Bed', tex: { all: 'bed' }, model: 'bed', opaque: false, hard: 0.2, sound: 'wood', drops: drop1('bed') });
+defBlock(B.BED, { name: 'bed', label: 'Red Bed', tex: { all: 'bed' }, model: 'bed', opaque: false, hard: 0.2, sound: 'wood', drops: (rng, tier, tool, data) => [{ id: bedItemFor(bedColor(data)), n: 1 }] });
 defBlock(B.STONE_BRICKS, { name: 'stone_bricks', label: 'Stone Bricks', tex: { all: 'stone_bricks' }, hard: 1.5, tool: 'pickaxe', tier: 0 });
 defBlock(B.STONE_BRICKS_MOSSY, { name: 'stone_bricks_mossy', label: 'Mossy Stone Bricks', tex: { all: 'stone_bricks_mossy' }, hard: 1.5, tool: 'pickaxe', tier: 0 });
 defBlock(B.STONE_BRICKS_CRACKED, { name: 'stone_bricks_cracked', label: 'Cracked Stone Bricks', tex: { all: 'stone_bricks_cracked' }, hard: 1.5, tool: 'pickaxe', tier: 0 });
@@ -806,6 +826,7 @@ defItem('feather', { label: 'Feather', icon: 'i_feather' });
 defItem('gunpowder', { label: 'Gunpowder', icon: 'i_gunpowder' });
 defItem('leather', { label: 'Leather', icon: 'i_leather' });
 defItem('bone', { label: 'Bone', icon: 'i_bone' });
+defItem('ink_sac', { label: 'Ink Sac', icon: 'i_ink_sac' });   // squid drop → black dye
 defItem('bonemeal', { label: 'Bone Meal', icon: 'i_bonemeal' });
 defItem('redstone', { label: 'Redstone', icon: 'i_redstone' });
 defItem('lapis', { label: 'Lapis Lazuli', icon: 'i_lapis' });
@@ -862,7 +883,7 @@ defItem('water_bucket', { label: 'Water Bucket', icon: 'i_water_bucket', stack: 
 defItem('lava_bucket', { label: 'Lava Bucket', icon: 'i_lava_bucket', stack: 1, fuel: 20000 });
 
 // spawn eggs (creative / commands)
-const SPAWN_EGG_MOBS = ['pig', 'cow', 'sheep', 'chicken', 'villager', 'zombie', 'skeleton', 'creeper', 'spider', 'enderman', 'blaze', 'ghast', 'pigman'];
+const SPAWN_EGG_MOBS = ['pig', 'cow', 'sheep', 'chicken', 'squid', 'wolf', 'villager', 'zombie', 'skeleton', 'creeper', 'spider', 'enderman', 'blaze', 'ghast', 'pigman'];
 for (const m of SPAWN_EGG_MOBS) {
   const label = m === 'pigman' ? 'Zombie Pigman' : m[0].toUpperCase() + m.slice(1);
   defItem('spawn_' + m, { label: 'Spawn ' + label, icon: 'i_egg_' + m, spawnEgg: m });
@@ -920,7 +941,17 @@ recipe('bread', 1, ['WWW'], { W: 'wheat' });
 recipe('golden_apple', 1, ['GGG', 'GAG', 'GGG'], { G: 'gold_ingot', A: 'apple' });
 shapeless('blaze_powder', 2, ['blaze_rod']);
 shapeless('eye_of_ender', 1, ['ender_pearl', 'blaze_powder']);
-recipe('bed', 1, ['WWW', 'PPP'], { W: ANY_WOOL, P: ANY_PLANK });
+// beds: one per wool colour, like vanilla — the bed comes out the colour of the wool you used,
+// so this is one recipe per colour instead of the old single ANY_WOOL one. 'bed' is the red one
+// (it keeps that id so beds in old saves and in generated villages still resolve).
+for (const bc of BED_COLORS) {
+  const wool = bc === 'white' ? 'wool' : 'wool_' + bc;
+  const id = bedItemFor(bc);
+  if (id !== 'bed') {
+    defItem(id, { label: WOOL_LABEL[bc] + ' Bed', block: B.BED, blockData: BED_COLOR_IDX[bc] << 4, stack: 1, icon: null });
+  }
+  recipe(id, 1, ['WWW', 'PPP'], { W: wool, P: ANY_PLANK });
+}
 recipe('door', 3, ['PP', 'PP', 'PP'], { P: ANY_PLANK });
 recipe('stone_bricks', 4, ['SS', 'SS'], { S: 'stone' });
 recipe('sandstone', 1, ['SS', 'SS'], { S: 'sand' });
@@ -986,6 +1017,7 @@ recipe('flower_pot', 1, ['B B', ' B '], { B: 'brick' });
 // re-dyed (ANY_WOOL), which is what vanilla does too.
 shapeless('dye_yellow', 1, ['dandelion']);
 shapeless('dye_red', 1, ['poppy']);
+shapeless('dye_black', 1, ['ink_sac']);   // 1 sac → 1 dye, like vanilla
 for (const c in WOOL_COLORS) {
   const col = WOOL_COLORS[c];
   if (col.name === 'white') continue;
@@ -1914,32 +1946,36 @@ function buildBlockTextures() {
     }
     for (const [nx, ny] of [[2, 3], [13, 3], [2, 12], [13, 12]]) s(nx, ny, [96, 96, 104]);
   });
-  T.reg('bed_top_head', (s, r) => {
-    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-      let c;
-      if (y < 3) c = [146, 110, 63];
-      else if (y < 9) c = mixc([230, 230, 230], [205, 205, 205], r.next() * 0.5); // pillow
-      else c = mixc([170, 36, 36], [144, 28, 28], r.next() * 0.4);
-      if (x === 0 || x === 15) c = [104, 78, 42];
-      s(x, y, c);
-    }
-  });
-  T.reg('bed_top_foot', (s, r) => {
-    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-      let c = mixc([170, 36, 36], [144, 28, 28], r.next() * 0.4);
-      if (y > 12) c = [152, 30, 30];
-      if (x === 0 || x === 15) c = [104, 78, 42];
-      s(x, y, c);
-    }
-  });
-  T.reg('bed_side', (s, r) => {
-    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-      let c;
-      if (y < 7) s(x, y, [0, 0, 0, 0]);
-      else if (y < 10) s(x, y, mixc([170, 36, 36], [144, 28, 28], r.next() * 0.4));
-      else s(x, y, mixc([146, 110, 63], [122, 92, 52], r.next() * 0.4));
-    }
-  });
+  // beds: one tile set per colour (see BED_COLORS). The blanket takes the wool colour, the
+  // pillow stays white and the frame stays oak — same as vanilla's coloured beds.
+  for (const bc of BED_COLORS) {
+    const cloth = WOOL_RGB[bc], clothD = shade(cloth, 0.82), clothE = shade(cloth, 0.9);
+    T.reg('bed_top_head_' + bc, (s, r) => {
+      for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+        let c;
+        if (y < 3) c = [146, 110, 63];
+        else if (y < 9) c = mixc([230, 230, 230], [205, 205, 205], r.next() * 0.5); // pillow
+        else c = mixc(cloth, clothD, r.next() * 0.4);
+        if (x === 0 || x === 15) c = [104, 78, 42];
+        s(x, y, c);
+      }
+    });
+    T.reg('bed_top_foot_' + bc, (s, r) => {
+      for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+        let c = mixc(cloth, clothD, r.next() * 0.4);
+        if (y > 12) c = clothE;
+        if (x === 0 || x === 15) c = [104, 78, 42];
+        s(x, y, c);
+      }
+    });
+    T.reg('bed_side_' + bc, (s, r) => {
+      for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+        if (y < 7) s(x, y, [0, 0, 0, 0]);
+        else if (y < 10) s(x, y, mixc(cloth, clothD, r.next() * 0.4));
+        else s(x, y, mixc([146, 110, 63], [122, 92, 52], r.next() * 0.4));
+      }
+    });
+  }
   const brickTex = (mossy, cracked) => (s, r) => {
     for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
       const row = y >> 3;
@@ -2130,6 +2166,8 @@ function buildItemTextures() {
     cow: [[68, 52, 40], [163, 125, 86]],
     sheep: [[228, 228, 228], [255, 176, 144]],
     chicken: [[164, 164, 164], [255, 58, 58]],
+    squid: [[34, 87, 111], [115, 143, 138]],
+    wolf: [[213, 203, 179], [204, 153, 111]],
     villager: [[86, 62, 53], [150, 131, 106]],
     zombie: [[0, 172, 172], [125, 201, 101]],
     skeleton: [[192, 192, 192], [92, 92, 92]],
@@ -2283,7 +2321,24 @@ function buildItemTextures() {
     if (col.name === 'white') continue;
     T.reg('i_dye_' + col.name, dyeTex(col.rgb));
   }
-  // flower pot item: the pot seen from the side, empty
+  // ink sac: a fat dark-blue teardrop with a pinched neck, like vanilla's
+  T.reg('i_ink_sac', (s, r) => {
+    clearTex(s);
+    const mid = [22, 34, 96], lo = [12, 19, 58], hi = [46, 62, 138];
+    for (let y = 3; y < 14; y++) {
+      // narrow at the top, widest around y=10 — the sac's droopy bag shape
+      const t = (y - 3) / 10;
+      const hw = 1.5 + t * 4.2 - (t > 0.82 ? (t - 0.82) * 14 : 0);
+      for (let x = Math.round(8 - hw); x < Math.round(8 + hw); x++) {
+        const edge = x <= 8 - hw || x >= 8 + hw - 1 || y === 3 || y === 13;
+        s(x, y, edge ? lo : (x - 8 + (y - 8) < -3 ? hi : mid));
+      }
+    }
+    s(6, 6, mixc(hi, [255, 255, 255], 0.4));   // glossy highlight
+    // a couple of ink drips off the bottom
+    for (const [dx, dy] of [[9, 14], [6, 14]]) if (r.chance(0.9)) s(dx, dy, lo);
+  });
+  // flower pot: the pot seen from the side, empty
   T.reg('i_flower_pot', (s, r) => {
     clearTex(s);
     const body = (x, y) => mixc([148, 92, 70], [120, 72, 55], r.next() * 0.6);
@@ -2596,6 +2651,69 @@ function buildMobSkins() {
     for (const f of Object.values(boxUVRects(26, 0, 3, 5, 1))) fill(R, f, solid([234, 180, 60])); // legs
     for (const f of Object.values(boxUVRects(24, 13, 1, 4, 6))) fill(R, f, () => mixc(wd, [190, 190, 190], r.next())); // wings
   }
+  // ---- SQUID (64x32): body(12,16,12)@(0,0), tentacle(2,18,2)@(48,0) ----
+  // Vanilla's squid is a flat blue-grey with a slightly darker underside; the eyes live on the
+  // body's sides (its "front" face is the top of the mantle, so eyes can't go on face 2).
+  {
+    const R = region('squid', 64, 32);
+    const r = RNG(31);
+    const base = [40, 84, 112], dark = [28, 62, 86], light = [58, 108, 138];
+    const uvr = boxUVRects(0, 0, 12, 16, 12);
+    for (const [fname, f] of Object.entries(uvr)) {
+      // bottom = the mantle's tip, kept darker so the shape reads in open water
+      const a = fname === 'bottom' ? dark : fname === 'top' ? light : base;
+      fill(R, f, () => mixc(a, shade(a, 0.82), r.next() * 0.7));
+    }
+    // eyes on the left/right faces of the mantle, near its top
+    for (const [ex, ey] of [[uvr.right[0] + 5, uvr.right[1] + 4], [uvr.left[0] + 6, uvr.left[1] + 4]]) {
+      for (let dy = 0; dy < 3; dy++) for (let dx = 0; dx < 3; dx++) P(R, ex + dx, ey + dy, [232, 232, 226]);
+      P(R, ex + 1, ey + 1, [18, 18, 24]);
+    }
+    for (const f of Object.values(boxUVRects(48, 0, 2, 18, 2))) fill(R, f, () => mixc(dark, base, r.next() * 0.6));
+  }
+  // ---- WOLF (64x32): head(6,6,4)@(0,0), mane(8,6,7)@(21,0), body(6,9,6)@(18,14),
+  //      leg(2,8,2)@(0,18), tail(2,8,2)@(9,18) — vanilla's layout exactly ----
+  // One geometry, several skins: wild, angry (blood-red eyes + dark brows) and one tamed skin
+  // per collar colour. Vanilla paints the collar as a separate tinted layer over the mane;
+  // there are only four dyes here, so baking a skin per colour costs less than an extra pass.
+  // The mane and body are drawn rotated 90° about X, which puts each side rect's FIRST row at
+  // the animal's FRONT — that's where the collar band goes.
+  function wolfSkin(name, eye, brow, collar) {
+    const R = region(name, 64, 32);
+    const r = RNG(xmur3(name)());
+    const fur = [214, 212, 208], furD = [172, 169, 164], furL = [238, 237, 234];
+    const grey = () => mixc(fur, furD, r.next() * 0.85);
+    const head = boxUVRects(0, 0, 6, 6, 4);
+    for (const f of Object.values(head)) fill(R, f, grey);
+    // muzzle: a paler wedge over the lower face with a black nose at its tip
+    for (let y = 3; y < 6; y++) for (let x = 1; x < 5; x++) P(R, head.front[0] + x, head.front[1] + y, mixc(furL, fur, r.next() * 0.5));
+    for (let x = 2; x < 4; x++) { P(R, head.front[0] + x, head.front[1] + 4, [30, 26, 24]); P(R, head.front[0] + x, head.front[1] + 5, [52, 45, 40]); }
+    // ears: dark triangles on the top face's front corners (vanilla has no ear geometry either)
+    for (const ex of [0, 4]) for (let dx = 0; dx < 2; dx++) {
+      P(R, head.top[0] + ex + dx, head.top[1], shade(furD, 0.62));
+      P(R, head.top[0] + ex + dx, head.top[1] + 1, mixc(furD, shade(furD, 0.7), 0.5));
+    }
+    // eyes, one pixel each side of the snout, with a brow pixel above when angry
+    for (const ex of [1, 4]) {
+      P(R, head.front[0] + ex, head.front[1] + 2, eye);
+      if (brow) P(R, head.front[0] + ex, head.front[1] + 1, brow);
+    }
+    const mane = boxUVRects(21, 0, 8, 6, 7);
+    for (const f of Object.values(mane)) fill(R, f, () => mixc(fur, furD, r.next() * 0.95)); // shaggier than the body
+    if (collar) {
+      const band = () => mixc(collar, shade(collar, 0.72), r.next() * 0.6);
+      // one pixel is plenty — two read as a saddle blanket rather than a collar
+      for (const side of [mane.right, mane.left, mane.front, mane.back]) {
+        for (let x = 0; x < side[2]; x++) P(R, side[0] + x, side[1], band());
+      }
+    }
+    for (const f of Object.values(boxUVRects(18, 14, 6, 9, 6))) fill(R, f, grey);                                  // body
+    for (const f of Object.values(boxUVRects(0, 18, 2, 8, 2))) fill(R, f, () => mixc(furD, fur, r.next() * 0.6));  // legs, a shade darker
+    for (const f of Object.values(boxUVRects(9, 18, 2, 8, 2))) fill(R, f, grey);                                   // tail
+  }
+  wolfSkin('wolf', [30, 26, 32], null, null);
+  wolfSkin('wolf_angry', [198, 26, 24], [96, 86, 80], null);
+  for (const wc in WOOL_RGB) wolfSkin('wolf_tame_' + wc, [64, 52, 42], null, WOOL_RGB[wc]);
   // ---- humanoid painter (zombie, skeleton, pigman, steve) 64x32 classic layout ----
   function humanoid(name, skinCol, skinDark, shirt, pants, paintFace, armCol) {
     const R = region(name, 64, 32);
@@ -2899,7 +3017,7 @@ function buildIcons() {
     if (bd.model === 'cross' || bd.model === 'crop' || bd.model === 'torch' || bd.model === 'ladder' || bd.model === 'rail' || bd.model === 'pane') {
       icon = bd.tint === 'grass' ? tintCopy(bd.tex.all, GRASS_ICON_TINT) : tileCanvas(bd.tex.all);
     } else if (bd.id === B.DOOR) icon = doorIcon();
-    else if (bd.id === B.BED) icon = bedIcon();
+    else if (bd.id === B.BED) icon = bedIcon('red');
     else if (bd.model === 'trapdoor') icon = trapdoorIcon();
     else if (bd.model === 'sign' || bd.model === 'wall_sign') icon = signIcon();
     else if (bd.model === 'iframe') icon = frameIcon();
@@ -2923,6 +3041,8 @@ function buildIcons() {
     if (col.name === 'white') continue;
     T.icons['wool_' + col.name] = isoIcon('wool_' + col.name, 'wool_' + col.name, 'wool_' + col.name);
   }
+  // same for the non-red beds — all one block id carrying a colour nibble
+  for (const bc of BED_COLORS) if (bc !== 'red') T.icons[bedItemFor(bc)] = bedIcon(bc);
   // sign item: the board seen flat-on with its post below, like vanilla's icon
   function signIcon() {
     const cv = document.createElement('canvas'); cv.width = cv.height = 16;
@@ -2962,11 +3082,11 @@ function buildIcons() {
     c.drawImage(lower, 0, 0, 16, 16, 3, 8, 10, 8);
     return cv;
   }
-  function bedIcon() {
+  function bedIcon(bc) {
     const cv = document.createElement('canvas'); cv.width = cv.height = 16;
     const c = cv.getContext('2d');
     c.imageSmoothingEnabled = false;
-    const head = tileCanvas('bed_top_head'), foot = tileCanvas('bed_top_foot');
+    const head = tileCanvas('bed_top_head_' + bc), foot = tileCanvas('bed_top_foot_' + bc);
     c.save(); c.setTransform(0.44, 0.18, -0.44, 0.18, 8, 3); c.drawImage(foot, 0, 0); c.restore();
     c.save(); c.setTransform(0.44, 0.18, -0.44, 0.18, 11.5, 4.8); c.drawImage(head, 0, 0); c.restore();
     c.fillStyle = '#6b4e2a';
@@ -6127,7 +6247,8 @@ const Mesher = {
   },
   emitBed(world, def, x, y, z, data) {
     const head = (data & 8) !== 0;
-    const topTex = head ? 'bed_top_head' : 'bed_top_foot';
+    const c = bedColor(data);   // bits4-7; the blanket tiles come in one set per colour
+    const topTex = (head ? 'bed_top_head_' : 'bed_top_foot_') + c;
     const h = 0.5625;
     // top
     const facing = (data >> 1) & 3;
@@ -6136,7 +6257,7 @@ const Mesher = {
     for (let f = 0; f < 4; f++) {
       const Q = FACE_V[f].map(cv => [x + cv[0], y + cv[1] * h, z + cv[2]]);
       const uv = [[0, 1], [1, 1], [1, 1 - h], [0, 1 - h]];
-      this.litQuad(world, def, Q, 'bed_side', uv, f, x, y, z);
+      this.litQuad(world, def, Q, 'bed_side_' + c, uv, f, x, y, z);
     }
   },
   emitFire(world, def, x, y, z) {
@@ -7042,6 +7163,8 @@ const Particles = {
       else if (kind === 'note') this.spawn({ x: x + (Math.random() - 0.5) * 0.4, y: y + 0.5, z: z + (Math.random() - 0.5) * 0.4, vy: 1.1, life: 0.8, size: 0.14, tex: 'note_p' });
       else if (kind === 'slime') this.spawn({ x: x + (Math.random() - 0.5) * 0.5, y, z: z + (Math.random() - 0.5) * 0.5, vx: Math.cos(a) * m * 2, vy: 1 + Math.random(), vz: Math.sin(a) * m * 2, life: 0.5, size: 0.1, tex: 'slime_p', grav: 11, shrink: false });
       else if (kind === 'lava') this.spawn({ x, y, z, vx: Math.cos(a) * m * 2.4, vy: 3 + Math.random() * 3, vz: Math.sin(a) * m * 2.4, life: 0.8, size: 0.1, tex: 'flame_p', grav: 13, fullBright: true, shrink: false });
+      // a hurt squid's ink: big dark puffs that hang in the water and drift, barely sinking
+      else if (kind === 'ink') this.spawn({ x: x + (Math.random() - 0.5) * 0.7, y: y + (Math.random() - 0.5) * 0.7, z: z + (Math.random() - 0.5) * 0.7, vx: Math.cos(a) * m * 1.4, vy: (Math.random() - 0.6) * 0.5, vz: Math.sin(a) * m * 1.4, life: 1.6 + Math.random() * 1.2, size: 0.3, tex: 'smoke_' + ((Math.random() * 4) | 0), grav: 0.4, drag: 0.82, r: 0.06, g: 0.08, b: 0.22 });
       else this.spawn({ x, y, z, vx: Math.cos(a) * m, vy: Math.random(), vz: Math.sin(a) * m, life: 0.8, size: 0.12, tex: 'smoke_0' });
     }
   },
@@ -7450,6 +7573,42 @@ const MOB_MODELS = {
       out[7] = bonePose(e, [3.5 / 16, 9 / 16, 0], { z: -flap });
     },
   },
+  // Squid: vanilla's mantle + 8 tentacles. Everything hangs off ONE pivot at the mantle's
+  // centre so `squidTilt` can roll the whole animal like vanilla's renderer does — the
+  // tentacle ring is baked into each box's own offset instead of its pivot.
+  squid: {
+    tex: 'squid', h: 0.8, w: 0.8,
+    boxes: (() => {
+      const b = [{ name: 'mantle', uv: [0, 0], size: [12, 16, 12], off: [-6 / 16, -8 / 16, -6 / 16] }];
+      for (let i = 0; i < 8; i++) b.push({ name: 'tent' + i, uv: [48, 0], size: [2, 18, 2], off: [-1 / 16, -18 / 16, -1 / 16] });
+      return b;
+    })(),
+    pose(e, out) {
+      // one flap cycle drives all eight tentacles together, as in vanilla
+      const flap = 0.5 + Math.sin(e.age * 2.4) * 0.42;
+      const base = () => {
+        const m = Mat4.create();
+        Mat4.translate(m, e.x, e.y + 0.62, e.z);
+        Mat4.rotY(m, Math.PI - e.yaw);   // same convention as bonePose
+        Mat4.rotX(m, e.squidTilt || 0);
+        if (e.deathT > 0) Mat4.rotZ(m, Math.min(e.deathT / 0.4, 1) * Math.PI / 2 * 0.9);
+        return m;
+      };
+      out[0] = base();
+      for (let i = 0; i < 8; i++) {
+        const a = i * Math.PI * 2 / 8;
+        const m = base();
+        Mat4.translate(m, Math.cos(a) * 5 / 16, -7 / 16, Math.sin(a) * 5 / 16);
+        Mat4.rotY(m, -a);                 // face the tentacle outward before splaying it
+        Mat4.rotX(m, -flap * 0.55);       // ...then swing it out and back
+        out[1 + i] = m;
+      }
+    },
+  },
+  // Wolf: vanilla box sizes and atlas layout, centred on x (vanilla's model is offset by 1px,
+  // which just makes it look lopsided). `wolfPose` also serves the tamed/angry skins below.
+  wolf: wolfModel('wolf'),
+  wolf_angry: wolfModel('wolf_angry'),
   zombie: humanoidModel('zombie', true),
   skeleton: humanoidModel('skeleton', true),
   pigman: humanoidModel('pigman', true),
@@ -7618,6 +7777,9 @@ const MOB_MODELS = {
     },
   },
 };
+// the tamed skins, one per dye we have — registered here because WOOL_RGB lives in blocks.js
+for (const wc in WOOL_RGB) MOB_MODELS['wolf_tame_' + wc] = wolfModel('wolf_tame_' + wc);
+
 function humanoidModel(tex, armsOut) {
   return {
     tex, h: 1.95, w: 0.6,
@@ -7661,6 +7823,67 @@ function humanoidModel(tex, armsOut) {
     },
   };
 }
+// One wolf geometry per skin (wild / angry / one per collar colour) — the boxes and the pose
+// are shared, only `tex` differs, and `Wolf.syncModel` picks which one to draw.
+function wolfModel(tex) {
+  return {
+    tex, h: 0.85, w: 0.6,
+    boxes: [
+      { name: 'head', uv: [0, 0], size: [6, 6, 4], off: [-3 / 16, -3 / 16, 0] },
+      { name: 'mane', uv: [21, 0], size: [8, 6, 7], off: [-4 / 16, -3 / 16, -3.5 / 16] },
+      // The body's pivot sits at its FRONT end (local y 0), not its middle, which is what lets
+      // the sitting tilt raise the chest and settle the rump instead of swinging both ends out
+      // and pushing the belly through the floor. Vanilla's box is off-centre for the same reason.
+      { name: 'body', uv: [18, 14], size: [6, 9, 6], off: [-3 / 16, -9 / 16, -3 / 16] },
+      { name: 'leg0', uv: [0, 18], size: [2, 8, 2], off: [-1 / 16, -8 / 16, -1 / 16] },
+      { name: 'leg1', uv: [0, 18], size: [2, 8, 2], off: [-1 / 16, -8 / 16, -1 / 16] },
+      { name: 'leg2', uv: [0, 18], size: [2, 8, 2], off: [-1 / 16, -8 / 16, -1 / 16] },
+      { name: 'leg3', uv: [0, 18], size: [2, 8, 2], off: [-1 / 16, -8 / 16, -1 / 16] },
+      { name: 'tail', uv: [9, 18], size: [2, 8, 2], off: [-1 / 16, -8 / 16, -1 / 16] },
+    ],
+    pose: wolfPose,
+  };
+}
+function wolfPose(e, out) {
+  const sw = Math.sin(e.walkT) * clamp(e.walkAmp, 0, 1) * 0.85;
+  const lx = 1.5 / 16;
+  // Vanilla's tail angle doubles as a health bar: stiff and straight out when angry, drooping
+  // when wild, held high by a healthy tamed wolf and sinking as it takes damage.
+  let tail;
+  if (e.angry) tail = 1.5394;
+  else if (e.tamed) tail = (0.55 - (e.maxHp - e.hp) * 0.02) * Math.PI;
+  else tail = Math.PI / 5;
+  tail = clamp(tail, 0.25, 1.85);
+  if (e.sitting) {
+    // Vanilla's sitting pose, converted out of its y-down model space. The hind legs drop almost
+    // to the ground and lie FORWARD — the earlier guess tucked them so high and so far forward
+    // that the body swallowed them entirely — the chest lifts, the rump settles, and the tail
+    // hangs down beside the hind paws instead of staying up at back height.
+    out[0] = bonePose(e, [0, 0.62, 0.32], { x: (e.headPitch || 0) + 0.1, y: headYawLocal(e) });
+    out[1] = bonePose(e, [0, 0.56, 0.14], { x: 1.2566 });             // mane 72deg, chest up
+    out[2] = bonePose(e, [0, 0.579, 0.10], { x: 0.95 });              // body slung back, rump on the floor
+    // Front legs lean forward only slightly: any more and the paws go through the floor, since
+    // a leg is 0.5 long and the pivot can't rise above standing height without looking wrong.
+    out[3] = bonePose(e, [-lx, 0.52, 0.25], { x: -0.18 });
+    out[4] = bonePose(e, [lx, 0.52, 0.25], { x: -0.18 });
+    out[5] = bonePose(e, [-lx, 0.15, -0.13], { x: -Math.PI / 2 });    // hind legs flat, pointing forward
+    out[6] = bonePose(e, [lx, 0.15, -0.13], { x: -Math.PI / 2 });
+    // held out behind rather than up; the lower clamp keeps a badly hurt wolf's tail off the floor
+    out[7] = bonePose(e, [0, 0.30, -0.40], { x: clamp(tail, 1.15, 1.85) });
+    return;
+  }
+  // Standing. Pivot heights are tuned so the head and the mane line up along the top — any
+  // mismatch there reads as a step in the wolf's neck — while the mane still stands proud of
+  // the lower back.
+  out[0] = bonePose(e, [0, 0.635, 0.30], { x: e.headPitch || 0, y: headYawLocal(e) });
+  out[1] = bonePose(e, [0, 0.60, 0.075], { x: Math.PI / 2 });
+  out[2] = bonePose(e, [0, 0.545, 0.165], { x: Math.PI / 2 });   // pz compensates the front-end pivot
+  out[3] = bonePose(e, [-lx, 0.5, 0.25], { x: sw });
+  out[4] = bonePose(e, [lx, 0.5, 0.25], { x: -sw });
+  out[5] = bonePose(e, [-lx, 0.5, -0.38], { x: -sw });
+  out[6] = bonePose(e, [lx, 0.5, -0.38], { x: sw });
+  out[7] = bonePose(e, [0, 0.60, -0.36], { x: tail });
+}
 function quadPose(e, out, o) {
   const sw = Math.sin(e.walkT) * clamp(e.walkAmp, 0, 1) * 0.7;
   out[0] = bonePose(e, [0, o.bodyY, 0], { x: Math.PI / 2 });
@@ -7671,6 +7894,8 @@ function quadPose(e, out, o) {
   out[ls + 2] = bonePose(e, [-o.legX, o.legY, -o.legZ], { x: -sw });
   out[ls + 3] = bonePose(e, [o.legX, o.legY, -o.legZ], { x: sw });
 }
+// The head's extra turn on top of the body's. bonePose applies rotY(PI - yaw), so this has to be
+// -(headYaw - yaw) for the two to compose into rotY(PI - headYaw).
 function headYawLocal(e) {
   let d = (e.headYaw !== undefined ? e.headYaw : e.yaw) - e.yaw;
   while (d > Math.PI) d -= Math.PI * 2;
@@ -7680,6 +7905,12 @@ function headYawLocal(e) {
 function bonePose(e, pivot, rot, scale) {
   const m = Mat4.create();
   Mat4.translate(m, e.x, e.y, e.z);
+  // ONE yaw convention for the whole project, the camera's: forward = (sin yaw, -cos yaw)
+  // (see Player.lookDir). Mat4.rotY(a) sends the model's own +z — its face — to (sin a, cos a),
+  // so PI - yaw is the angle that lines the face up with that forward. Mobs used to build their
+  // yaw with the opposite x sign, which reflected their facing about the north-south axis: a mob
+  // heading east was drawn heading west, while a remote player (whose yaw came straight from the
+  // camera) was fine. Fixed at the source, in lookAt and friends — do NOT "fix" it here.
   Mat4.rotY(m, Math.PI - e.yaw);
   if (e.deathT > 0) Mat4.rotZ(m, Math.min(e.deathT / 0.4, 1) * Math.PI / 2 * 0.9);
   Mat4.translate(m, pivot[0], pivot[1], pivot[2]);
@@ -7816,7 +8047,9 @@ class Entity {
   distTo(o) { return Math.hypot(this.x - o.x, this.y - o.y, this.z - o.z); }
   lookAt(tx, ty, tz, rate, dt) {
     const dx = tx - this.x, dz = tz - this.z;
-    const targetYaw = Math.atan2(-dx, -dz);
+    // camera convention (forward = (sin yaw, -cos yaw)), so the renderer draws the mob facing
+    // whatever it is looking at. The x term used to be negated, which mirrored every mob's facing.
+    const targetYaw = Math.atan2(dx, -dz);
     let d = targetYaw - this.yaw;
     while (d > Math.PI) d -= Math.PI * 2;
     while (d < -Math.PI) d += Math.PI * 2;
@@ -8036,7 +8269,7 @@ class Arrow extends Entity {
     }
     this.x += this.vx * dt; this.y += this.vy * dt; this.z += this.vz * dt;
     this.vy -= this.gravity * dt;
-    this.yaw = Math.atan2(-this.vx, -this.vz);
+    this.yaw = Math.atan2(this.vx, -this.vz);   // camera convention, as in lookAt
     if (this.crit && Math.random() < dt * 20) Particles.burst('crit', this.x, this.y, this.z, 1);
     if (this.y < -30 || this.age > 30) this.remove();
   }
@@ -8346,6 +8579,203 @@ class Chicken extends PassiveMob {
   }
   dropLoot() { dropN(this, 'chicken', 1); dropN(this, 'feather', (Math.random() * 3) | 0); }
   xpValue() { return 1 + ((Math.random() * 3) | 0); }
+}
+// Squid: swims in 3D instead of walking, so it drives its own velocity rather than going
+// through PassiveMob's wander/moveToward. `squidTilt` is the angle between its body axis
+// (mantle up, tentacles down) and its heading — 0 = hovering upright, PI/2 = level swimming,
+// which is what makes it look like it's jetting mantle-first the way vanilla's does.
+class Squid extends Mob {
+  constructor(w, x, y, z) {
+    super(w, 'squid', x, y, z);
+    this.hp = this.maxHp = 10;
+    this.gravity = 14;
+    this.squidTilt = 0;
+    this.burstT = Math.random() * 1.5;
+    this.sdx = 0; this.sdy = 0; this.sdz = 0;
+    this.fleeT = 0; this.airT = 0;
+  }
+  dropLoot() { dropN(this, 'ink_sac', 1 + ((Math.random() * 3) | 0)); }
+  xpValue() { return 1 + ((Math.random() * 3) | 0); }
+  onHurt(src) {
+    super.onHurt(src);
+    Particles.burst('ink', this.x, this.y + 0.4, this.z, 16, 0.8);
+    this.fleeT = 3.5;
+    this.burstT = 0;   // bolt immediately
+    if (src && src.x !== undefined) {
+      const dx = this.x - src.x, dz = this.z - src.z, d = Math.hypot(dx, dz) || 1;
+      this.yaw = Math.atan2(-dx / d, -dz / d);   // away from whatever hit it
+    }
+  }
+  update(dt, game) {
+    this.updateFluids();
+    if (this.fleeT > 0) this.fleeT -= dt;
+    if (!this.inWater) {
+      // beached: flops helplessly and suffocates, like vanilla
+      this.squidTilt = lerp(this.squidTilt, Math.PI / 2, dt * 2.5);
+      if (this.onGround && Math.random() < dt * 2.5) { this.vy = 3.2; this.yaw += (Math.random() - 0.5) * 2.2; }
+      this.airT += dt;
+      if (this.airT > 2) { this.airT = 0; this.takeDamage(1, null); }
+      this.physics(dt);
+      return;
+    }
+    this.airT = 0;
+    this.burstT -= dt;
+    if (this.burstT <= 0) {
+      // pick a fresh 3D heading and jet along it; frightened squid burst harder and more often
+      const fleeing = this.fleeT > 0;
+      this.burstT = (fleeing ? 0.4 : 1.4) + Math.random() * 2;
+      if (!fleeing) this.yaw = Math.random() * Math.PI * 2;
+      const sp = fleeing ? 4.4 : 1.9;
+      const climb = (Math.random() - 0.45) * 0.85;
+      this.sdx = Math.sin(this.yaw) * sp; this.sdz = -Math.cos(this.yaw) * sp; this.sdy = climb * sp;
+    }
+    this.vx = lerp(this.vx, this.sdx, dt * 2.2);
+    this.vy = lerp(this.vy, this.sdy, dt * 2.2);
+    this.vz = lerp(this.vz, this.sdz, dt * 2.2);
+    // never jet out of the water — a squid that breaches would start suffocating
+    if (this.vy > 0 && this.world.getBlock(floor(this.x), floor(this.y + this.h + 0.5), floor(this.z)) !== B.WATER) {
+      this.vy = -0.5; this.sdy = -0.7;
+    }
+    const horiz = Math.hypot(this.vx, this.vz);
+    // body axis follows the velocity: upright when hovering, level when cruising
+    const want = (horiz + Math.abs(this.vy) < 0.2) ? 0 : Math.atan2(horiz, this.vy);
+    this.squidTilt = lerp(this.squidTilt, clamp(want, 0, 2.6), dt * 2.5);
+    if (horiz > 0.25) this.yaw = Math.atan2(this.vx, -this.vz);
+    this.idleSound(game, 'squidSay', 8);
+    this.move(dt);
+  }
+}
+// Wolf: neutral in the wild, tameable with bones, and once tamed it follows you, sits on
+// command and joins your fights. Three visual states (wild / angry / tamed-with-a-collar)
+// are separate skins over one geometry — see wolfModel.
+class Wolf extends Mob {
+  constructor(w, x, y, z) {
+    super(w, 'wolf', x, y, z);
+    this.hp = this.maxHp = 8;
+    this.speed = 2.7;                 // wolves outrun the player's walk
+    this.attackDmg = 3;
+    this.attackRange = 1.7;
+    this.tamed = false; this.sitting = false; this.angry = false;
+    this.collar = 'red';
+    this.foe = null;                  // what it's currently fighting (a mob or a player)
+    this.angryT = 0;
+    this.syncModel();
+  }
+  // which skin to draw; Renderer.drawMob reads `e.model` in preference to `e.type`
+  syncModel() {
+    this.model = this.angry ? 'wolf_angry' : this.tamed ? 'wolf_tame_' + this.collar : 'wolf';
+  }
+  dropLoot() {}                       // vanilla wolves drop nothing
+  xpValue() { return 1 + ((Math.random() * 3) | 0); }
+  onHurt(src) {
+    super.onHurt(src);
+    if (this.tamed) { this.sitting = false; this.syncModel(); return; }
+    // hit by a player → this wolf AND its packmates go for them, vanilla's pack aggro
+    if (src && src.byPlayer) {
+      for (const e of this.world.entities) {
+        if (e instanceof Wolf && !e.tamed && !e.dead && Math.hypot(e.x - this.x, e.z - this.z) < 16) e.enrage();
+      }
+    } else this.enrage();
+  }
+  enrage() {
+    this.angry = true;
+    this.angryT = 20;
+    this.foe = null;                  // re-picked as the nearest player in update()
+    this.syncModel();
+  }
+  // a bone has a 1/3 chance, like vanilla; returns true if the bone was used up
+  tryTame(player) {
+    if (this.tamed || this.angry) return false;
+    if (Math.random() < 1 / 3) {
+      this.tamed = true;
+      this.sitting = true;            // vanilla sits the wolf the moment it's tamed
+      this.hp = this.maxHp = 20;
+      this.foe = null;
+      this.syncModel();
+      Particles.burst('heart', this.x, this.y + 0.7, this.z, 7);
+      Sfx.play('wolfBark', { pos: [this.x, this.y, this.z], pitch: 1.3 });
+    } else {
+      Particles.burst('smoke', this.x, this.y + 0.7, this.z, 7);
+    }
+    return true;
+  }
+  toggleSit() { this.sitting = !this.sitting; Sfx.play('wolfBark', { pos: [this.x, this.y, this.z], pitch: this.sitting ? 0.9 : 1.15 }); }
+  // wild wolves hunt sheep; tamed ones back the player up against whatever they're fighting
+  findPrey() {
+    let best = null, bd = 16;
+    for (const e of this.world.entities) {
+      if (e.dead || e === this || e.deathT > 0) continue;
+      if (e.type !== 'sheep' && e.type !== 'skeleton') continue;
+      const d = Math.hypot(e.x - this.x, e.z - this.z);
+      if (d < bd) { bd = d; best = e; }
+    }
+    return best;
+  }
+  attackFoe(dt, game, foe) {
+    const d = Math.hypot(foe.x - this.x, foe.z - this.z);
+    const d3 = this.distTo(foe);
+    this.lookAt(foe.x, foe.y + 0.9, foe.z, 8, dt);
+    if (d > this.attackRange * 0.8) this.moveToward(foe.x, foe.z, this.speed, dt);
+    this.attackCd -= dt;
+    if (d3 < this.attackRange && this.attackCd <= 0 && Math.abs(foe.y - this.y) < 2.5) {
+      this.attackCd = 0.9;
+      foe.takeDamage(this.attackDmg, { x: this.x, y: this.y, z: this.z, knock: 0.8, byWolf: true });
+      Sfx.play('wolfGrowl', { pos: [this.x, this.y, this.z] });
+    }
+    this.physics(dt);
+  }
+  update(dt, game) {
+    const p = game.world === this.world ? game.player : null;
+    if (this.angry) {
+      this.angryT -= dt;
+      if (this.angryT <= 0) { this.angry = false; this.foe = null; this.syncModel(); }
+      else {
+        const foe = (this.foe && !this.foe.dead && !this.foe.deadFlag) ? this.foe : (game.mode === 'creative' ? null : p);
+        this.foe = foe;
+        if (foe) { this.attackFoe(dt, game, foe); this.idleSound(game, 'wolfGrowl'); return; }
+      }
+    }
+    if (this.sitting) {
+      // planted: no wandering, no chasing, just gravity so it can't hover
+      this.vx = 0; this.vz = 0;
+      if (p) this.lookAt(p.x, p.y + 1.4, p.z, 3, dt);
+      this.physics(dt);
+      return;
+    }
+    // fighting something (tamed wolf helping out, or a wild one hunting)
+    if (this.foe && (this.foe.dead || this.foe.deathT > 0 || this.distTo(this.foe) > 22)) this.foe = null;
+    if (!this.foe && Math.random() < dt * 0.6) this.foe = this.tamed ? null : this.findPrey();
+    if (this.tamed && p && p.wolfTarget && !p.wolfTarget.dead) this.foe = p.wolfTarget;
+    if (this.foe) { this.attackFoe(dt, game, this.foe); return; }
+    if (this.tamed && p && !p.deadFlag) {
+      const d = Math.hypot(p.x - this.x, p.z - this.z);
+      // teleport home if it gets left behind (vanilla does this past ~12 blocks)
+      if (d > 18) {
+        const tx = p.x + (Math.random() - 0.5) * 3, tz = p.z + (Math.random() - 0.5) * 3;
+        for (let y = floor(p.y) + 2; y > floor(p.y) - 4; y--) {
+          if (Blocks[this.world.getBlock(floor(tx), y - 1, floor(tz))].solid && this.world.getBlock(floor(tx), y, floor(tz)) === B.AIR) {
+            this.x = tx; this.y = y; this.z = tz; this.vx = this.vy = this.vz = 0;
+            break;
+          }
+        }
+      } else if (d > 2.6) {
+        this.lookAt(p.x, p.y + 1.4, p.z, 7, dt);
+        this.moveToward(p.x, p.z, this.speed, dt);
+        this.physics(dt);
+        this.idleSound(game, 'wolfPant', 8);
+        return;
+      } else {
+        this.lookAt(p.x, p.y + 1.4, p.z, 5, dt);
+        this.vx *= 0.8; this.vz *= 0.8;
+        this.physics(dt);
+        this.idleSound(game, 'wolfPant', 8);
+        return;
+      }
+    }
+    this.wander(dt);
+    this.idleSound(game, this.tamed ? 'wolfPant' : 'wolfBark');
+    this.physics(dt);
+  }
 }
 class Villager extends PassiveMob {
   constructor(w, x, y, z) { super(w, 'villager', x, y, z); this.hp = this.maxHp = 20; this.speed = 1.9; }
@@ -8857,7 +9287,7 @@ class EnderDragon extends Entity {
       }
     }
     this.x += this.vx * dt; this.y += this.vy * dt; this.z += this.vz * dt;
-    this.yaw = Math.atan2(-this.vx, -this.vz) + Math.PI; // dragon flies head-first
+    this.yaw = Math.atan2(this.vx, -this.vz) + Math.PI; // dragon flies head-first
     // destroy blocks
     if (((this.age * 10) | 0) % 3 === 0) {
       let broke = false;
@@ -9155,7 +9585,7 @@ class Minecart extends Rideable {
 
 // ---------- spawn helpers ----------
 const MOB_CLASSES = {
-  pig: Pig, cow: Cow, sheep: Sheep, chicken: Chicken, villager: Villager,
+  pig: Pig, cow: Cow, sheep: Sheep, chicken: Chicken, squid: Squid, wolf: Wolf, villager: Villager,
   zombie: Zombie, skeleton: Skeleton, creeper: Creeper, spider: Spider,
   enderman: Enderman, blaze: Blaze, ghast: Ghast, pigman: ZombiePigman,
   end_crystal: EndCrystal, dragon: EnderDragon,
@@ -9222,7 +9652,13 @@ function serializeEntity(e) {
   const base = { t: e.type, x: r2(e.x), y: r2(e.y), z: r2(e.z), yaw: r2(e.yaw) };
   if (e.type === 'item') return e.stack ? Object.assign(base, { s: e.stack }) : null;
   if (e.type === 'boat' || e.type === 'minecart') return base;
-  if (MOB_CLASSES[e.type]) return Object.assign(base, { hp: r2(e.hp) });
+  if (MOB_CLASSES[e.type]) {
+    const o = Object.assign(base, { hp: r2(e.hp) });
+    // a tamed wolf is the one mob whose state is worth more than its position — losing the
+    // collar and the sit flag on reload would mean re-taming it every session
+    if (e.type === 'wolf' && e.tamed) { o.tm = 1; o.st = e.sitting ? 1 : 0; o.co = e.collar; }
+    return o;
+  }
   return null;
 }
 function saveEntities(world) {
@@ -9245,6 +9681,13 @@ function loadEntities(world, list) {
     else if (MOB_CLASSES[o.t]) e = new MOB_CLASSES[o.t](world, o.x, o.y, o.z);
     if (!e) continue;
     if (typeof o.yaw === 'number') { e.yaw = o.yaw; e.headYaw = o.yaw; }
+    // restore tamed-ness BEFORE hp, so the 20-point tamed pool is in place when hp is clamped
+    if (o.t === 'wolf' && o.tm) {
+      e.tamed = true; e.maxHp = 20; e.hp = 20;
+      e.sitting = !!o.st;
+      if (WOOL_RGB[o.co]) e.collar = o.co;
+      e.syncModel();
+    }
     if (typeof o.hp === 'number' && o.hp > 0) e.hp = Math.min(o.hp, e.maxHp);
     world.entities.push(e);
   }
@@ -9260,16 +9703,20 @@ const NaturalSpawner = {
     if (this.t > 0) return;
     this.t = 1.5;
     const p = game.player;
-    let hostiles = 0, passives = 0;
+    let hostiles = 0, passives = 0, squids = 0, wolves = 0;
     for (const e of world.entities) {
       if (e.dead) continue;
       if (e instanceof HostileMob) hostiles++;
       else if (e instanceof PassiveMob) passives++;
-      // despawn far hostiles
-      if (e instanceof HostileMob && e.type !== 'blaze') {
-        const d = Math.hypot(e.x - p.x, e.z - p.z);
-        if (d > 110) e.remove();
-      }
+      // Squid and Wolf hang off Mob rather than PassiveMob (they swim / have tame states
+      // instead of grazing), so they need their own tallies — without them nothing caps how
+      // many can exist and a forest fills up with wolves.
+      else if (e.type === 'squid') squids++;
+      else if (e.type === 'wolf') { if (!e.tamed) wolves++; }
+      // despawn far hostiles, plus wild wolves and squid; a TAMED wolf is the player's and
+      // must never be culled, however far it has been left behind
+      const far = Math.hypot(e.x - p.x, e.z - p.z) > 110;
+      if (far && ((e instanceof HostileMob && e.type !== 'blaze') || e.type === 'squid' || (e.type === 'wolf' && !e.tamed))) e.remove();
     }
     const cap = world.dim === 'end' ? 16 : 14;
     if (hostiles < cap) {
@@ -9318,10 +9765,37 @@ const NaturalSpawner = {
       const d = 28 + Math.random() * 30;
       const x = p.x + Math.cos(a) * d, z = p.z + Math.sin(a) * d;
       if (world.isLoaded(floor(x), floor(z))) {
+        const biome = Gen.biomeAt(floor(x), floor(z));
         for (let y = 100; y > SEA; y--) {
           if (world.getBlock(floor(x), y, floor(z)) === B.GRASS && world.getBlock(floor(x), y + 1, floor(z)) === B.AIR) {
-            spawnMob(world, ['pig', 'cow', 'sheep', 'chicken'][(Math.random() * 4) | 0], x, y + 1, z);
+            // wolves are a forest/taiga mob and arrive as a pack, like vanilla
+            if (wolves < 8 && (biome.id === 'forest' || biome.id === 'taiga' || biome.id === 'birch') && Math.random() < 0.3) {
+              for (let k = 0; k < 2 + ((Math.random() * 3) | 0); k++) spawnMob(world, 'wolf', x + Math.random() * 3 - 1.5, y + 1, z + Math.random() * 3 - 1.5);
+            } else {
+              spawnMob(world, ['pig', 'cow', 'sheep', 'chicken'][(Math.random() * 4) | 0], x, y + 1, z);
+            }
             break;
+          }
+        }
+      }
+    }
+    // squid: their own budget, since they live where nothing else spawns. Vanilla wants deep
+    // enough water with air above it, in groups of 2-4.
+    if (world.dim === 'overworld' && Math.random() < 0.3) {
+      if (squids < 8) {
+        const a = Math.random() * Math.PI * 2, d = 22 + Math.random() * 34;
+        const x = p.x + Math.cos(a) * d, z = p.z + Math.sin(a) * d;
+        if (world.isLoaded(floor(x), floor(z)) && world.getBlock(floor(x), SEA, floor(z)) === B.WATER) {
+          // find a spot with at least 3 blocks of water over its floor
+          for (let y = SEA - 1; y > SEA - 14; y--) {
+            if (world.getBlock(floor(x), y, floor(z)) !== B.WATER) break;
+            if (world.getBlock(floor(x), y + 2, floor(z)) !== B.WATER) continue;
+            if (Math.random() < 0.45) {
+              for (let k = 0; k < 2 + ((Math.random() * 3) | 0); k++) {
+                spawnMob(world, 'squid', x + Math.random() * 3 - 1.5, y, z + Math.random() * 3 - 1.5);
+              }
+              break;
+            }
           }
         }
       }
@@ -9359,7 +9833,7 @@ function updateEntities(world, dt, game) {
       if (e.tyaw != null) { e.yaw = e.tyaw; e.headYaw = e.thyaw != null ? e.thyaw : e.tyaw; }
       if (e.thpitch != null) e.headPitch = lerp(e.headPitch || 0, e.thpitch, k);
       // projectile puppets: orient from the host-streamed velocity
-      if (e.tvx != null) { e.vx = e.tvx; e.vy = e.tvy; e.vz = e.tvz; e.yaw = Math.atan2(-e.vx, -e.vz); }
+      if (e.tvx != null) { e.vx = e.tvx; e.vy = e.tvy; e.vz = e.tvz; e.yaw = Math.atan2(e.vx, -e.vz); }
       // derive a walk cycle from actual displacement (mobs) — no physics needed
       const moved = Math.hypot(e.x - ox, e.z - oz);
       e.walkAmp = lerp(e.walkAmp || 0, clamp(moved / Math.max(dt, 0.001) / 3, 0, 1), dt * 8);
@@ -10102,6 +10576,8 @@ class Player {
         Sfx.play('bowShoot', { pitch: 1.4 });
         return;
       }
+      // your tamed wolves pile onto whatever you just swung at (vanilla's owner-hurt-target)
+      this.wolfTarget = (target !== this && target.type !== 'wolf') ? target : null;
       target.takeDamage(dmg, { x: this.x, y: this.y, z: this.z, knock: this.sprinting ? 1.6 : 0.9, byPlayer: true });
       if (crit) Particles.burst('crit', target.x, target.y + target.h * 0.8, target.z, 8);
       Sfx.play(crit ? 'attackCrit' : 'attackHit');
@@ -10114,6 +10590,38 @@ class Player {
     }
     // multiplayer PvP: no mob in the way → try to hit the other player
     if (this.game.mpTryHitRemote) this.game.mpTryHitRemote(dir, this);
+  }
+  // Right-clicking a wolf, in vanilla's priority order: bone tames a wild one, meat heals a
+  // hurt tamed one, a dye recolours its collar, and a bare hand (or anything else) toggles sit.
+  // Returns true when the click was consumed. A puppet wolf belongs to the host, so the guest
+  // leaves it alone rather than desyncing its state.
+  interactWolf(wolf, held) {
+    if (wolf.puppet) return false;
+    if (!wolf.tamed) {
+      if (!held || held.id !== 'bone' || wolf.angry) return false;
+      if (wolf.tryTame(this)) this.consumeHeld();
+      return true;
+    }
+    if (held) {
+      const it = Items[held.id];
+      if (it.food && wolf.hp < wolf.maxHp) {
+        wolf.hp = Math.min(wolf.maxHp, wolf.hp + it.food);
+        Particles.burst('heart', wolf.x, wolf.y + 0.7, wolf.z, 5);
+        this.consumeHeld();
+        return true;
+      }
+      if (held.id.startsWith('dye_')) {
+        const c = held.id.slice(4);
+        if (WOOL_RGB[c] && wolf.collar !== c) {
+          wolf.collar = c;
+          wolf.syncModel();
+          this.consumeHeld();
+          return true;
+        }
+      }
+    }
+    wolf.toggleSit();
+    return true;
   }
   pickEntity(range) {
     const dir = this.lookDir();
@@ -10146,10 +10654,11 @@ class Player {
     const held = this.heldItem();
     const eye = this.eyePos();
     const hit = this.world.raycast(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], 4.5);
-    // 0) climb into a boat/minecart in the crosshair
+    // 0) climb into a boat/minecart in the crosshair, or deal with a wolf
     if (!this.sneaking) {
       const ent = this.pickEntity(3.6);
       if (ent instanceof Rideable && !ent.rider) { ent.mount(this); this.useCd = 0.4; this.swingNow(); return; }
+      if (ent && ent.type === 'wolf' && this.interactWolf(ent, held)) { this.useCd = 0.35; this.swingNow(); return; }
     }
     // 1) block interactions (unless sneaking)
     if (hit && !this.sneaking) {
@@ -10650,8 +11159,10 @@ class Player {
       if (!blockSolidTop(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz)) || !blockSolidTop(w.getBlock(hx, py - 1, hz), w.getData(hx, py - 1, hz))) return;
       const hId = w.getBlock(hx, py, hz);
       if (hId !== B.AIR && !(Blocks[hId] && Blocks[hId].replaceable)) return;
-      w.setBlock(px, py, pz, B.BED, facing << 1);
-      w.setBlock(hx, py, hz, B.BED, (facing << 1) | 8);
+      // the held item carries the colour in bits4-7 (see BED_COLORS); both halves get it
+      const col = (Items[held.id].blockData || 0) & 0xF0;
+      w.setBlock(px, py, pz, B.BED, col | (facing << 1));
+      w.setBlock(hx, py, hz, B.BED, col | (facing << 1) | 8);
       this.afterPlace(held, bdef, px, py, pz);
       return;
     }
@@ -10976,6 +11487,16 @@ const Sfx = {
     sheepHurt(d) { this.tone(d, { f: 300, f1: 180, type: 'sawtooth', dur: 0.3, vol: 0.34, vib: 25, vibF: 10 }); },
     chickenSay(d) { [520, 470, 430].forEach((f, i) => this.tone(d, { f: f + Math.random() * 60, f1: f * 0.7, t: i * 0.12, type: 'triangle', dur: 0.09, vol: 0.25 })); },
     chickenHurt(d) { this.tone(d, { f: 600, f1: 350, type: 'triangle', dur: 0.15, vol: 0.32 }); },
+    // wolf: a short two-tone yap, a low rolling growl, and a soft breathy pant when tamed
+    wolfBark(d, p) { this.tone(d, { f: 300 * p, f1: 190 * p, type: 'sawtooth', dur: 0.11, vol: 0.32 }); this.noise(d, { dur: 0.09, vol: 0.16, type: 'bandpass', f: 900 * p }); },
+    wolfGrowl(d, p) { this.tone(d, { f: 110 * p, f1: 85 * p, type: 'sawtooth', dur: 0.5, vol: 0.3, vib: 22, vibF: 14 }); },
+    wolfPant(d, p) { this.noise(d, { dur: 0.1, vol: 0.13, type: 'bandpass', f: 700 * p }); this.noise(d, { t: 0.16, dur: 0.1, vol: 0.11, type: 'bandpass', f: 620 * p }); },
+    wolfHurt(d, p) { this.tone(d, { f: 460 * p, f1: 240 * p, type: 'sawtooth', dur: 0.22, vol: 0.36, vib: 12, vibF: 8 }); },
+    wolfDeath(d, p) { this.tone(d, { f: 420 * p, f1: 120, type: 'sawtooth', dur: 0.5, vol: 0.38, vib: 14, vibF: 5 }); },
+    // squid: vanilla's are near-silent, so these are just wet flicks
+    squidSay(d, p) { this.noise(d, { dur: 0.18, vol: 0.1, type: 'lowpass', f: 420 * p }); },
+    squidHurt(d, p) { this.noise(d, { dur: 0.2, vol: 0.22, type: 'lowpass', f: 560 * p, f1: 260 }); },
+    squidDeath(d, p) { this.noise(d, { dur: 0.45, vol: 0.24, type: 'lowpass', f: 500 * p, f1: 150 }); },
     villagerSay(d) { this.tone(d, { f: 185, f1: 130, type: 'triangle', dur: 0.4, vol: 0.35, vib: 8, vibF: 5 }); },
     villagerHurt(d) { this.tone(d, { f: 220, f1: 150, type: 'triangle', dur: 0.25, vol: 0.35 }); },
     genericHurt(d, p) { this.tone(d, { f: 240 * p, f1: 140, type: 'triangle', dur: 0.18, vol: 0.3 }); },
@@ -14527,6 +15048,9 @@ const Game = {
         f,
       };
       if (e.hp != null && MOB_MODELS[e.type]) { row.h = e.hp; row.mx = e.maxHp; }
+      // a wolf's look is all state (collar colour, sitting, angry eyes), so it has to ride along
+      if (e.type === 'wolf') { row.wm = e.model; row.ws = e.sitting ? 1 : 0; row.wt = e.tamed ? 1 : 0; }
+      if (e.type === 'squid') row.sq = +(e.squidTilt || 0).toFixed(2);
       if (e.type === 'creeper') row.fu = +(e.fuseT || 0).toFixed(2);
       else if (e.type === 'tnt') row.fu = +(e.fuse || 0).toFixed(2);
       if (e.type === 'falling_block') { row.b = e.blockId; row.bd = e.data; }
@@ -14555,6 +15079,8 @@ const Game = {
       e.puppetDying = !!(row.f & 2);
       e.onGround = !!(row.f & 4);
       if (row.h != null) { e.hp = row.h; e.maxHp = row.mx; }
+      if (row.wm != null && MOB_MODELS[row.wm]) { e.model = row.wm; e.sitting = !!row.ws; e.tamed = !!row.wt; }
+      if (row.sq != null) e.squidTilt = row.sq;
       if (row.fu != null) { if (e.type === 'creeper') e.fuseT = row.fu; else e.fuse = row.fu; }
       if (row.vx != null) { e.tvx = row.vx; e.tvy = row.vy; e.tvz = row.vz; }
       if (row.g != null) e.big = !!row.g;
