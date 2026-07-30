@@ -324,6 +324,11 @@ const FONT_GLYPHS = {
   '{': [0x08,0x36,0x41], '|': [0x7F], '}': [0x41,0x36,0x08], '~': [0x04,0x02,0x04,0x08,0x04],
 };
 
+// atlas tile name for a glyph drawn in the 3D world (sign text) — see textures.js
+function glyphTex(ch) { return 'g_' + ch.charCodeAt(0); }
+// column count of a glyph (its real pixel width); space has none
+function glyphCols(ch) { const g = FONT_GLYPHS[ch]; return g ? g.length : 0; }
+
 const Font = {
   // width in font-pixels (unscaled) of a string
   width(text) {
@@ -415,7 +420,32 @@ const B = {
   REDSTONE_BLOCK: 88, REPEATER: 89,
   REDSTONE_TORCH: 90, REDSTONE_TORCH_OFF: 91,
   TRAPDOOR: 92, FENCE_GATE: 93, GLASS_PANE: 94,
+  CLAY: 95, BRICKS: 96, FLOWER_POT: 97,
+  SIGN: 98, WALL_SIGN: 99, ITEM_FRAME: 100,
 };
+
+// wool/dye colours — vanilla data values, so the table can grow to all 16 later without
+// invalidating a single saved world. Only the dyes we can actually craft exist for now.
+const WOOL_COLORS = {
+  0: { name: 'white', label: 'White', rgb: [237, 237, 237] },
+  4: { name: 'yellow', label: 'Yellow', rgb: [225, 200, 40] },
+  14: { name: 'red', label: 'Red', rgb: [175, 45, 40] },
+};
+// what a flower pot can hold: data value → the plant it shows (0 = empty). `cube` = drawn
+// as a small box instead of a cross (cactus).
+const POTTED = {
+  1: { item: 'dandelion', tex: 'dandelion' },
+  2: { item: 'poppy', tex: 'poppy' },
+  3: { item: 'sapling', tex: 'sapling' },
+  4: { item: 'mushroom_brown', tex: 'mushroom_brown' },
+  5: { item: 'mushroom_red', tex: 'mushroom_red' },
+  6: { item: 'cactus', tex: 'cactus_side', cube: true },
+};
+const POT_DATA_FOR = {}; // item id → pot data value
+for (const d in POTTED) POT_DATA_FOR[POTTED[d].item] = +d;
+// models that are drawn as a flat sprite in the hand / as a dropped item, never as a cube
+const FLAT_MODELS = ['cross', 'crop', 'rail', 'pot'];
+function blockIsFlat(id) { const d = Blocks[id]; return !!(d && FLAT_MODELS.includes(d.model)); }
 
 // def fields:
 // name(item id), label(display), tex {all|top,bottom,side,front}, model: cube|cross|liquid|torch|crop|layer|door|chest|cactus|portal|frame|endportal|fire|egg|bed
@@ -425,7 +455,7 @@ const B = {
 // sound('stone'|'wood'|'grass'|'gravel'|'sand'|'snow'|'cloth'|'glass')
 // drops(rng,tier,tool)→[{id,n}] (default: itself) replaceable flammable tint('grass'|'foliage')
 // pillar(logs: data bits0-1 = axis 0:y 1:x 2:z — top tex on the two ends, bark rotated to follow the axis)
-const Blocks = new Array(96).fill(null);
+const Blocks = new Array(112).fill(null);
 function defBlock(id, def) {
   def.id = id;
   if (def.solid === undefined) def.solid = true;
@@ -466,7 +496,10 @@ defBlock(B.LEAVES, { name: 'leaves', label: 'Oak Leaves', tex: { all: 'leaves' }
 defBlock(B.GLASS, { name: 'glass', label: 'Glass', tex: { all: 'glass' }, opaque: false, cutout: true, hard: 0.3, sound: 'glass', drops: () => [] });
 defBlock(B.LAPIS_ORE, { name: 'lapis_ore', label: 'Lapis Lazuli Ore', tex: { all: 'lapis_ore' }, hard: 3, tool: 'pickaxe', tier: 1, drops: rng => [{ id: 'lapis', n: rng.irange(4, 8) }], xp: [2, 5] });
 defBlock(B.SANDSTONE, { name: 'sandstone', label: 'Sandstone', tex: { top: 'sandstone_top', bottom: 'sandstone_bottom', side: 'sandstone' }, hard: 0.8, tool: 'pickaxe', tier: 0 });
-defBlock(B.WOOL, { name: 'wool', label: 'Wool', tex: { all: 'wool' }, hard: 0.8, sound: 'cloth', flammable: true });
+// wool data bits0-3 = colour (vanilla values, see WOOL_COLORS). texFor picks the tile,
+// and it drops the item for its own colour so dyed wool survives a break/replace.
+defBlock(B.WOOL, { name: 'wool', label: 'Wool', tex: { all: 'wool' }, hard: 0.8, sound: 'cloth', flammable: true,
+  colored: true, drops: (rng, tier, tool, data) => [{ id: woolItem(data & 15), n: 1 }] });
 defBlock(B.DANDELION, { name: 'dandelion', label: 'Dandelion', tex: { all: 'dandelion' }, model: 'cross', solid: false, hard: 0, sound: 'grass', cutout: true, replaceable: false });
 defBlock(B.POPPY, { name: 'poppy', label: 'Poppy', tex: { all: 'poppy' }, model: 'cross', solid: false, hard: 0, sound: 'grass', cutout: true });
 defBlock(B.MUSHROOM_BROWN, { name: 'mushroom_brown', label: 'Mushroom', tex: { all: 'mushroom_brown' }, model: 'cross', solid: false, hard: 0, sound: 'grass', cutout: true });
@@ -573,6 +606,79 @@ defBlock(B.REPEATER, { name: 'repeater', label: 'Redstone Repeater', tex: { all:
 // when the block it's attached to becomes powered. Same 'torch' model as a normal torch.
 defBlock(B.REDSTONE_TORCH, { name: 'redstone_torch', label: 'Redstone Torch', tex: { all: 'redstone_torch' }, model: 'torch', solid: false, opaque: false, hard: 0, lum: 7, sound: 'wood', cutout: true });
 defBlock(B.REDSTONE_TORCH_OFF, { name: 'redstone_torch_off', label: 'Redstone Torch', tex: { all: 'redstone_torch_off' }, model: 'torch', solid: false, opaque: false, hard: 0, sound: 'wood', cutout: true, drops: drop1('redstone_torch') });
+// clay: soft grey-blue patches on shallow river/ocean floors. Digs into 4 clay balls,
+// which smelt into bricks — the whole point of the brick chain.
+defBlock(B.CLAY, { name: 'clay', label: 'Clay', tex: { all: 'clay' }, hard: 0.6, tool: 'shovel', sound: 'gravel', drops: rng => [{ id: 'clay_ball', n: rng.irange(2, 4) }] });
+defBlock(B.BRICKS, { name: 'bricks', label: 'Bricks', tex: { all: 'bricks' }, hard: 2, tool: 'pickaxe', tier: 0 });
+// flower pot: data 0 = empty, otherwise the POTTED entry it holds. Right-click puts a plant
+// in / takes it back out. Breaking it drops the pot AND whatever was planted.
+defBlock(B.FLOWER_POT, { name: 'flower_pot', label: 'Flower Pot', tex: { all: 'flower_pot' }, model: 'pot', opaque: false, cutout: true, hard: 0, sound: 'stone',
+  drops: (rng, tier, tool, data) => {
+    const d = [{ id: 'flower_pot', n: 1 }];
+    const p = POTTED[data & 15];
+    if (p) d.push({ id: p.item, n: 1 });
+    return d;
+  } });
+// signs: a standing one (data 0-15 = 16 rotations, like vanilla) and a wall one
+// (data 0-3 = the direction it faces). Text lives in a `sign` block entity with 4 lines.
+// Both are walk-through and drop the same `sign` item.
+defBlock(B.SIGN, { name: 'sign', label: 'Sign', tex: { all: 'sign_plank' }, model: 'sign', solid: false, opaque: false, cutout: true, hard: 1, tool: 'axe', sound: 'wood', flammable: true });
+defBlock(B.WALL_SIGN, { name: 'wall_sign', label: 'Sign', tex: { all: 'sign_plank' }, model: 'wall_sign', solid: false, opaque: false, cutout: true, hard: 1, tool: 'axe', sound: 'wood', flammable: true, drops: drop1('sign') });
+// item frame: data 0-3 = the wall it hangs on (the direction it faces). The displayed
+// stack + its rotation live in an `iframe` block entity.
+// data 0-5 = the direction it faces (FACE_N index), so a frame goes on any of the six
+// sides of a block — walls, the floor and the underside of a block, like vanilla.
+defBlock(B.ITEM_FRAME, { name: 'item_frame', label: 'Item Frame', tex: { all: 'item_frame' }, model: 'iframe', solid: false, opaque: false, cutout: true, hard: 0.25, sound: 'wood', flammable: true, drops: drop1('item_frame') });
+
+// wool item id for a colour value — white keeps the plain 'wool' id so old saves and the
+// bed recipe are untouched
+function woolItem(c) { return c && WOOL_COLORS[c] ? 'wool_' + WOOL_COLORS[c].name : 'wool'; }
+// the 16 sign rotations (data * 22.5°); see mesher.emitSign for the vectors it builds
+function signAngle(data) { return (data & 15) * Math.PI / 8; }
+const SIGN_MAX_CHARS = 15;   // per line, like vanilla
+const SIGN_LINES = 4;
+// Text size on a sign, in blocks per font pixel. The board is 1 block wide, so this is
+// sized for the worst case — 15 wide characters = 89 font pixels — to land inside
+// SIGN_TEXT_W with a margin. Anything bigger and a full line hangs off both edges.
+const SIGN_TEXT_W = 0.90;
+const SIGN_PX = SIGN_TEXT_W / (SIGN_MAX_CHARS * 6 - 1);
+
+// ---- item frame geometry, shared by the mesher, collision, selection and placement ----
+// data = a FACE_N index (0:-z 1:+x 2:+z 3:-x 4:+y 5:-y) = the direction the frame faces.
+// It is mounted on the block at -n, so the panel hugs that side of its own cell.
+const ITEM_FRAME_T = 1.5 / 16;
+// [x0,y0,z0,x1,y1,z1] of the panel, in block-local 0..1
+function frameBox(f) {
+  const t = ITEM_FRAME_T;
+  switch (f & 7) {
+    case 0: return [0, 0, 1 - t, 1, 1, 1];   // faces -z, hangs on the block at +z
+    case 1: return [0, 0, 0, t, 1, 1];       // faces +x
+    case 2: return [0, 0, 0, 1, 1, t];       // faces +z
+    case 3: return [1 - t, 0, 0, 1, 1, 1];   // faces -x
+    case 4: return [0, 0, 0, 1, t, 1];       // faces +y (lying on a floor)
+    default: return [0, 1 - t, 0, 1, 1, 1];  // faces -y (stuck under a block)
+  }
+}
+// The panel's own right/up vectors, so the displayed item is laid out flat on it.
+// `right` is the screen-right of someone standing in front of the panel, i.e. (-n) x up —
+// which also makes right x up === n. That second property is the load-bearing one: the item
+// sprite is wound right-then-up, so any pair whose cross product points the other way gets
+// eaten by back-face culling and the item goes invisible even though it's really in there.
+function frameAxes(f) {
+  switch (f & 7) {
+    case 0: return [[-1, 0, 0], [0, 1, 0]];
+    case 1: return [[0, 0, -1], [0, 1, 0]];
+    case 2: return [[1, 0, 0], [0, 1, 0]];
+    case 3: return [[0, 0, 1], [0, 1, 0]];
+    case 4: return [[1, 0, 0], [0, 0, -1]];  // lying on a floor, seen from above facing north
+    default: return [[1, 0, 0], [0, 0, 1]];  // under a block, seen from below facing north
+  }
+}
+// world box of a frame at x,y,z (used for both the hitbox and the outline)
+function frameWorldBox(x, y, z, f) {
+  const b = frameBox(f);
+  return [x + b[0], y + b[1], z + b[2], x + b[3], y + b[4], z + b[5]];
+}
 
 // ---------- slab / stairs shapes (shared by mesher, collision and selection) ----------
 // A slab's data: bit0 = top half, bit1 = double (fills the whole cube).
@@ -683,6 +789,9 @@ for (const bd of Blocks) {
   defItem(bd.name, { label: bd.label, block: bd.id, icon: null });
 }
 Items['door'].stack = 64; Items['bed'].stack = 1;
+// the pot is drawn as a flat sprite (model 'pot' is in FLAT_MODELS), so it needs a real
+// item tile — the auto iso-cube icon would just be a terracotta block
+Items['flower_pot'].icon = 'i_flower_pot';
 
 // materials
 defItem('stick', { label: 'Stick', icon: 'i_stick', fuel: 100 });
@@ -706,6 +815,17 @@ defItem('blaze_rod', { label: 'Blaze Rod', icon: 'i_blaze_rod', fuel: 2400 });
 defItem('blaze_powder', { label: 'Blaze Powder', icon: 'i_blaze_powder' });
 defItem('eye_of_ender', { label: 'Eye of Ender', icon: 'i_eye_of_ender' });
 defItem('wheat', { label: 'Wheat', icon: 'i_wheat' });
+// clay → bricks chain: dig clay for balls, smelt a ball into a brick, 4 bricks = a block
+defItem('clay_ball', { label: 'Clay', icon: 'i_clay_ball' });
+defItem('brick', { label: 'Brick', icon: 'i_brick' });
+// dyes + the wool they make. Dyed wool is the WOOL block carrying a data value, so each
+// colour is one extra item id rather than a whole extra block.
+for (const c in WOOL_COLORS) {
+  const col = WOOL_COLORS[c];
+  if (col.name === 'white') continue;
+  defItem('dye_' + col.name, { label: col.label + ' Dye', icon: 'i_dye_' + col.name });
+  defItem('wool_' + col.name, { label: col.label + ' Wool', block: B.WOOL, blockData: +c, icon: null });
+}
 defItem('seeds', { label: 'Seeds', icon: 'i_seeds', plants: B.WHEAT_CROP });
 
 // food
@@ -764,6 +884,9 @@ for (const mat of ['iron', 'diamond']) {
 // {out:{id,n}, pattern:[rows], key:{ch: id|[ids]}, shapeless:[ids]}
 const ANY_LOG = ['log', 'spruce_log', 'birch_log'];
 const ANY_PLANK = 'planks';
+// every wool colour — accepted wherever vanilla accepts "any wool" (bed, re-dyeing)
+const ANY_WOOL = ['wool'];
+for (const c in WOOL_COLORS) if (WOOL_COLORS[c].name !== 'white') ANY_WOOL.push('wool_' + WOOL_COLORS[c].name);
 const Recipes = [];
 function recipe(out, n, pattern, key) { Recipes.push({ out: { id: out, n }, pattern, key }); }
 function shapeless(out, n, ings) { Recipes.push({ out: { id: out, n }, shapeless: ings }); }
@@ -797,7 +920,7 @@ recipe('bread', 1, ['WWW'], { W: 'wheat' });
 recipe('golden_apple', 1, ['GGG', 'GAG', 'GGG'], { G: 'gold_ingot', A: 'apple' });
 shapeless('blaze_powder', 2, ['blaze_rod']);
 shapeless('eye_of_ender', 1, ['ender_pearl', 'blaze_powder']);
-recipe('bed', 1, ['WWW', 'PPP'], { W: 'wool', P: ANY_PLANK });
+recipe('bed', 1, ['WWW', 'PPP'], { W: ANY_WOOL, P: ANY_PLANK });
 recipe('door', 3, ['PP', 'PP', 'PP'], { P: ANY_PLANK });
 recipe('stone_bricks', 4, ['SS', 'SS'], { S: 'stone' });
 recipe('sandstone', 1, ['SS', 'SS'], { S: 'sand' });
@@ -852,6 +975,22 @@ shapeless('redstone', 9, ['redstone_block']);
 // redstone torch = redstone + stick; repeater = 2 redstone torches + redstone + 3 stone (authentic)
 recipe('redstone_torch', 1, ['R', 'S'], { R: 'redstone', S: 'stick' });
 recipe('repeater', 1, ['TRT', 'SSS'], { T: 'redstone_torch', R: 'redstone', S: 'stone' });
+// sign: 6 planks + a stick → 3 (minecraft.wiki/w/Sign)
+recipe('sign', 3, ['PPP', 'PPP', ' S '], { P: ANY_PLANK, S: 'stick' });
+// item frame: 8 sticks around a leather (minecraft.wiki/w/Item_Frame)
+recipe('item_frame', 1, ['SSS', 'SLS', 'SSS'], { S: 'stick', L: 'leather' });
+// bricks: 4 bricks → 1 block; flower pot: 3 bricks in a V (minecraft.wiki/w/Flower_Pot)
+recipe('bricks', 1, ['BB', 'BB'], { B: 'brick' });
+recipe('flower_pot', 1, ['B B', ' B '], { B: 'brick' });
+// dyes from the two flowers we have, and dyeing wool with them. Any wool colour can be
+// re-dyed (ANY_WOOL), which is what vanilla does too.
+shapeless('dye_yellow', 1, ['dandelion']);
+shapeless('dye_red', 1, ['poppy']);
+for (const c in WOOL_COLORS) {
+  const col = WOOL_COLORS[c];
+  if (col.name === 'white') continue;
+  shapeless('wool_' + col.name, 1, [ANY_WOOL, 'dye_' + col.name]);
+}
 
 // match a WxH grid (array of item ids or null) against recipes → {out,{consume?}} or null
 function matchRecipe(grid, w, h) {
@@ -912,6 +1051,7 @@ const Smelting = {
   beef: { out: 'steak', xp: 0.35 },
   chicken: { out: 'cooked_chicken', xp: 0.35 },
   netherrack: { out: 'nether_brick', xp: 0.1 },
+  clay_ball: { out: 'brick', xp: 0.3 },
 };
 function fuelTicks(id) {
   const it = Items[id];
@@ -1216,13 +1356,80 @@ function buildBlockTextures() {
       s(x, y, [178,168,116]); s(x + 1, y, [186,176,124]);
     }
   });
-  T.reg('wool', (s, r) => {
+  // wool: one weave pattern, recoloured per dye. White keeps the plain 'wool' name so
+  // nothing that already references it has to change.
+  const woolTex = (base) => (s, r) => {
+    const dark = shade(base, 0.88), speck = shade(base, 0.8);
     for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
       const w = Math.sin((x + (y & 2 ? 2 : 0)) * 1.1) * 0.5 + 0.5;
-      let c = mixc([237,237,237], [208,208,208], w * 0.7 + r.next() * 0.25);
-      s(x, y, c);
+      s(x, y, mixc(base, dark, w * 0.7 + r.next() * 0.25));
     }
-    for (let i = 0; i < 8; i++) s(r.nextInt(16), r.nextInt(16), [190,190,190]);
+    for (let i = 0; i < 8; i++) s(r.nextInt(16), r.nextInt(16), speck);
+  };
+  T.reg('wool', woolTex([237, 237, 237]));
+  for (const c in WOOL_COLORS) {
+    const col = WOOL_COLORS[c];
+    if (col.name === 'white') continue;
+    T.reg('wool_' + col.name, woolTex(col.rgb));
+  }
+  // clay: soft pale grey-blue, no hard grain
+  T.reg('clay', (s, r) => mottle(s, r, [[160,166,179],[153,159,173],[168,174,186],[147,153,167]], 4, 0.3));
+  // bricks: three staggered rows of clay bricks in pale mortar
+  T.reg('bricks', (s, r) => {
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) s(x, y, [173, 165, 155]); // mortar
+    for (let row = 0; row < 4; row++) {
+      const y0 = row * 4, off = (row & 1) ? 4 : 0;
+      for (let bx = -8; bx < 16; bx += 8) {
+        for (let y = y0; y < y0 + 3; y++) for (let x = bx + off; x < bx + off + 7; x++) {
+          if (x < 0 || x > 15) continue;
+          const c = mixc([150, 97, 83], [124, 78, 66], r.next() * 0.7);
+          s(x, y, y === y0 ? mixc(c, [178, 120, 104], 0.4) : c);
+        }
+      }
+    }
+  });
+  // sign / item-frame boards: smooth pale oak with a subtle grain (the plank texture is
+  // too busy at the size a sign is actually read at)
+  T.reg('sign_plank', (s, r) => {
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      s(x, y, mixc([186, 152, 96], [166, 133, 81], r.next() * 0.45 + (y % 5 === 4 ? 0.35 : 0)));
+    }
+    for (let x = 0; x < 16; x++) { s(x, 0, [200, 166, 110]); s(x, 15, [148, 118, 70]); }
+  });
+  // item frame: pale birch border around a brown leather backing, like vanilla. The whole
+  // block face uses this one tile, so the border lands exactly on the frame's edge.
+  T.reg('item_frame', (s, r) => {
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const edge = x < 2 || y < 2 || x > 13 || y > 13;
+      if (edge) {
+        // border: light wood, with the outermost ring a touch darker so it reads as a rim
+        const rim = x === 0 || y === 0 || x === 15 || y === 15;
+        s(x, y, mixc(rim ? [176, 162, 112] : [214, 200, 140], [190, 176, 120], r.next() * 0.6));
+      } else {
+        s(x, y, mixc([150, 82, 54], [124, 66, 42], r.next() * 0.7));
+      }
+    }
+    for (let x = 2; x < 14; x++) s(x, 2, [166, 96, 66]);   // inner top highlight
+  });
+  // glyph tiles for text rendered IN THE WORLD (signs). One 16x16 tile per character with
+  // the glyph drawn 1:1 in the top-left corner; the mesher UV-crops to the real glyph
+  // width, so proportional spacing still works. NEAREST filtering + no mipmaps means the
+  // crop can't bleed into the neighbouring tile.
+  for (const ch in FONT_GLYPHS) {
+    const g = FONT_GLYPHS[ch];
+    T.reg(glyphTex(ch), (s) => {
+      clearTex(s);
+      for (let c = 0; c < g.length; c++) for (let row = 0; row < 8; row++) {
+        if (g[c] & (1 << row)) s(c, row, [255, 255, 255]);
+      }
+    });
+  }
+  // flower pot: terracotta staves with a darker rim
+  T.reg('flower_pot', (s, r) => {
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      s(x, y, mixc([148, 92, 70], [124, 74, 56], r.next() * 0.6 + (x % 4 === 3 ? 0.4 : 0)));
+    }
+    for (let x = 0; x < 16; x++) { s(x, 0, [166, 106, 82]); s(x, 1, [158, 100, 77]); s(x, 15, [110, 64, 48]); }
   });
   T.reg('dandelion', (s, r) => flowerTex(s, r, [255,236,32], [222,177,0]));
   T.reg('poppy', (s, r) => flowerTex(s, r, [226,40,32], [162,16,16]));
@@ -2029,6 +2236,65 @@ function buildItemTextures() {
     blobArt(s, 7, 7, 2, 2, [58, 160, 150], [38, 130, 120]);
     s(6, 6, [140, 230, 220]);
   });
+  // clay ball / brick — one blob shape, two palettes (raw grey clay vs fired brick)
+  T.reg('i_clay_ball', (s) => {
+    clearTex(s);
+    blobArt(s, 8, 9, 4.4, 3.8, [166, 172, 186], [136, 142, 156]);
+    s(6, 7, [196, 201, 212]); s(10, 11, [126, 132, 146]);
+  });
+  T.reg('i_brick', (s, r) => {
+    clearTex(s);
+    for (let y = 5; y < 12; y++) for (let x = 2; x < 14; x++) {
+      s(x, y, mixc([152, 96, 82], [122, 74, 62], r.next() * 0.7));
+    }
+    for (let x = 2; x < 14; x++) s(x, 5, [180, 122, 106]);
+    for (let x = 2; x < 14; x++) s(x, 11, [104, 60, 48]);
+    for (let y = 5; y < 12; y++) { s(2, y, [176, 118, 102]); s(13, y, [108, 64, 52]); }
+  });
+  // Dyes get their own silhouette instead of the generic dust scatter that bonemeal,
+  // redstone and glowstone all share — otherwise every powder in the game looks alike.
+  // A pinch of pigment: solid shaded core, dithered rim so it reads as ground powder,
+  // and a few grains that have escaped the pile.
+  const dyeTex = (base) => (s, r) => {
+    clearTex(s);
+    const hi = mixc(base, [255, 255, 255], 0.45);
+    const mid = base;
+    const lo = shade(base, 0.66);
+    const rim = shade(base, 0.48);
+    const cx = 7.6, cy = 8.4;
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
+      // wobbly radius → an irregular clump, not a perfect ball
+      const ang = Math.atan2(dy, dx);
+      const rad = 5.5 + Math.sin(ang * 3 + 0.7) * 0.5 + Math.cos(ang * 5 - 1.2) * 0.35;
+      const d = Math.hypot(dx * 1.04, dy);
+      if (d > rad) continue;
+      if (d > rad - 0.85) { if (((x + y) & 1) === 0) continue; s(x, y, rim); continue; } // grainy edge
+      const l = (-dx - dy) / 7.5; // lit from the top-left like the rest of the item art
+      s(x, y, l > 0.34 ? hi : l > -0.16 ? mid : lo);
+    }
+    s(5, 6, mixc(hi, [255, 255, 255], 0.55)); // specular fleck
+    s(6, 5, hi);
+    // a few grains spilled off the pile toward the bottom-right
+    for (const [gx, gy] of [[13, 11], [12, 13], [14, 9]]) s(gx, gy, r.chance(0.5) ? mid : lo);
+  };
+  for (const c in WOOL_COLORS) {
+    const col = WOOL_COLORS[c];
+    if (col.name === 'white') continue;
+    T.reg('i_dye_' + col.name, dyeTex(col.rgb));
+  }
+  // flower pot item: the pot seen from the side, empty
+  T.reg('i_flower_pot', (s, r) => {
+    clearTex(s);
+    const body = (x, y) => mixc([148, 92, 70], [120, 72, 55], r.next() * 0.6);
+    for (let y = 6; y < 14; y++) {
+      const inset = y < 8 ? 3 : 3 + ((y - 8) >> 1);
+      for (let x = inset; x < 16 - inset; x++) s(x, y, body(x, y));
+    }
+    for (let x = 3; x < 13; x++) s(x, 6, [170, 110, 86]);      // rim highlight
+    for (let x = 5; x < 11; x++) s(x, 7, [78, 54, 38]);        // soil in the mouth
+    for (let x = 6; x < 10; x++) s(x, 13, [104, 62, 46]);      // base shadow
+  });
   T.reg('i_blaze_rod', (s) => {
     clearTex(s);
     lineArt(s, 4, 12, 12, 4, [255, 200, 60], 2);
@@ -2635,6 +2901,9 @@ function buildIcons() {
     } else if (bd.id === B.DOOR) icon = doorIcon();
     else if (bd.id === B.BED) icon = bedIcon();
     else if (bd.model === 'trapdoor') icon = trapdoorIcon();
+    else if (bd.model === 'sign' || bd.model === 'wall_sign') icon = signIcon();
+    else if (bd.model === 'iframe') icon = frameIcon();
+    else if (bd.model === 'pot') icon = tileCanvas('i_flower_pot');
     else if (bd.model === 'gate') icon = gateIcon();
     else if (bd.model === 'fence') icon = fenceIcon();
     else {
@@ -2646,6 +2915,43 @@ function buildIcons() {
       else icon = isoIcon(t, sd, fr, tintTop, tintAll);
     }
     T.icons[bd.name] = icon;
+  }
+  // dyed wool items aren't their own blocks (they're WOOL + a data value), so their
+  // iso icons are built from the colour tiles here
+  for (const c in WOOL_COLORS) {
+    const col = WOOL_COLORS[c];
+    if (col.name === 'white') continue;
+    T.icons['wool_' + col.name] = isoIcon('wool_' + col.name, 'wool_' + col.name, 'wool_' + col.name);
+  }
+  // sign item: the board seen flat-on with its post below, like vanilla's icon
+  function signIcon() {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 16;
+    const c = cv.getContext('2d');
+    const rng = RNG(xmur3('icon:sign')());
+    const px = (x, y, col) => { c.fillStyle = col; c.fillRect(x, y, 1, 1); };
+    for (let y = 1; y <= 11; y++) for (let x = 1; x <= 14; x++) {
+      const v = rng.next();
+      px(x, y, y === 11 ? '#8a6a3c' : v < 0.18 ? '#a9854f' : v < 0.32 ? '#c4a267' : '#d0b077');
+    }
+    for (let x = 1; x <= 14; x++) px(x, 1, '#dcc08a');       // top highlight
+    for (let y = 12; y <= 15; y++) for (let x = 7; x <= 9; x++) {
+      px(x, y, rng.next() < 0.4 ? '#6b4f2a' : '#7d5e34');    // post
+    }
+    return cv;
+  }
+  // item frame item: the empty frame seen flat-on, with the little hanging nub on top
+  function frameIcon() {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 16;
+    const c = cv.getContext('2d');
+    const rng = RNG(xmur3('icon:frame')());
+    const px = (x, y, col) => { c.fillStyle = col; c.fillRect(x, y, 1, 1); };
+    for (let y = 2; y <= 15; y++) for (let x = 0; x <= 15; x++) {
+      const edge = x < 2 || y < 4 || x > 13 || y > 13;
+      if (edge) px(x, y, rng.next() < 0.35 ? '#bdaa74' : '#d8c88c');
+      else px(x, y, rng.next() < 0.3 ? '#8a4a2e' : '#a05a38');
+    }
+    for (let x = 7; x <= 9; x++) for (let y = 0; y <= 1; y++) px(x, y, '#2a2018'); // nub
+    return cv;
   }
   function doorIcon() {
     const cv = document.createElement('canvas'); cv.width = cv.height = 16;
@@ -2859,6 +3165,17 @@ const Gen = {
           id = B.WATER;
         }
         blocks[col + y] = id;
+      }
+      // clay patches on shallow river/ocean floors (vanilla puts clay in the sand/dirt
+      // right under the water, never deep down)
+      // (pDet.noise2 runs about ±0.62, so 0.3 lands clay on ~7% of shallow-water columns —
+      // patches you have to go looking for, not a carpet)
+      if (underwater && h >= SEA - 5 && this.pDet.noise2(wx / 11 + 640, wz / 11 - 410) > 0.3) {
+        const depth = 1 + ((this.pDet.noise2(wx / 5, wz / 5) > 0 ? 1 : 0));
+        for (let y = h; y > h - depth - 1 && y > 0; y--) {
+          const b = blocks[col + y];
+          if (b === B.SAND || b === B.DIRT || b === B.GRAVEL) blocks[col + y] = B.CLAY;
+        }
       }
       // decorations on surface (in-chunk)
       if (!underwater && blocks[col + h] === B.GRASS) {
@@ -3683,6 +4000,12 @@ class World {
     }
     return true;
   }
+  // force a chunk remesh without touching a block — sign text and item-frame contents
+  // live in the block entity, so nothing else would tell the mesher they changed
+  markMeshDirty(x, y, z) {
+    const c = this.getChunk(x >> 4, z >> 4);
+    if (c) c.dirty = true;
+  }
   dirtyNeighbor(x, z) {
     const n = this.chunks.get(this.key(x >> 4, z >> 4));
     if (n) n.dirty = true;
@@ -3696,9 +4019,22 @@ class World {
     const id = this.getBlock(x, y, z);
     if (id === B.AIR) return;
     const below = this.getBlock(x, y - 1, z);
-    const needsGround = [B.SAPLING, B.DANDELION, B.POPPY, B.TALL_GRASS, B.MUSHROOM_BROWN, B.MUSHROOM_RED, B.SNOW_LAYER];
+    const needsGround = [B.SAPLING, B.DANDELION, B.POPPY, B.TALL_GRASS, B.MUSHROOM_BROWN, B.MUSHROOM_RED, B.SNOW_LAYER, B.FLOWER_POT];
     if (needsGround.includes(id) && !blockSolidTop(below, this.getData(x, y - 1, z))) return this.breakBlock(x, y, z, null, true);
     if (id === B.WHEAT_CROP && below !== B.FARMLAND) return this.breakBlock(x, y, z, null, true);
+    if (id === B.SIGN && !blockSolidTop(below, this.getData(x, y - 1, z))) return this.breakBlock(x, y, z, null, true);
+    if (id === B.WALL_SIGN) {
+      // the wall is behind it: opposite the direction it faces
+      const n = FACE_N[this.getData(x, y, z) & 3];
+      const sup = Blocks[this.getBlock(x - n[0], y, z - n[2])];
+      if (!sup || !sup.opaque) return this.breakBlock(x, y, z, null, true);
+    }
+    if (id === B.ITEM_FRAME) {
+      // frames hang on any of the six sides, so the support can be above or below too
+      const n = FACE_N[this.getData(x, y, z) & 7];
+      const sup = Blocks[this.getBlock(x - n[0], y - n[1], z - n[2])];
+      if (!sup || !sup.opaque) return this.breakBlock(x, y, z, null, true);
+    }
     if (id === B.RAIL && !Blocks[below].solid) return this.breakBlock(x, y, z, null, true); // rails can't levitate
     if ((id === B.SAND || id === B.GRAVEL) && !Blocks[below].solid && y > 0) {
       // fall
@@ -3764,6 +4100,13 @@ class World {
     if (id === B.AIR) return;
     const data = this.getData(x, y, z);
     const def = Blocks[id];
+    // Grab what an item frame is displaying NOW: clearing the block below runs through
+    // setBlock, which drops the block entity, so reading it afterwards finds nothing.
+    let framedItem = null;
+    if (id === B.ITEM_FRAME) {
+      const fbe = this.blockEntities.get(x + ',' + y + ',' + z);
+      if (fbe && fbe.item) framedItem = fbe.item;
+    }
     // breaking half of a large chest: the surviving half keeps its own three rows (vanilla splits
     // them the same way), the broken half's rows spill. Do this before the generic spill below.
     if (id === B.CHEST && (data & 4)) {
@@ -3814,6 +4157,11 @@ class World {
       this.setBlock(x, y, z, B.AIR);
     } else {
       this.setBlock(x, y, z, B.AIR);
+    }
+    // the frame drops via def.drops; whatever it was displaying falls with it
+    if (framedItem && typeof spawnItemEntity === 'function'
+        && !(typeof Game !== 'undefined' && Game.mode === 'creative')) {
+      spawnItemEntity(this, x + 0.5, y + 0.5, z + 0.5, mkStack(framedItem.id, 1), true);
     }
     this.blockEntities.delete(x + ',' + y + ',' + z);
     // drops (none in creative, like vanilla)
@@ -4364,6 +4712,7 @@ class World {
       case 'stairs': return this.stairBoxes(x, y, z);
       case 'trapdoor': return this.trapdoorBox(x, y, z);
       case 'pane': return this.paneBoxes(x, y, z);
+      case 'pot': return [x + 0.3125, y, z + 0.3125, x + 0.6875, y + 0.375, z + 0.6875];
       case 'gate': {
         const d = this.getData(x, y, z);
         if (d & 4) return null; // open — walk straight through
@@ -4478,6 +4827,19 @@ class World {
       case 'slab': return this.slabBox(x, y, z);
       case 'stairs': return this.stairBoxes(x, y, z);
       case 'fence': return [x + 0.3125, y, z + 0.3125, x + 0.6875, y + 1, z + 0.6875];
+      case 'pot': return [x + 0.3125, y, z + 0.3125, x + 0.6875, y + 0.375, z + 0.6875];
+      // signs are walk-through, so these are only for aiming. A standing sign can point any
+      // of 16 ways, so its outline is the box that contains the board in every rotation.
+      case 'sign': return [x + 0.1, y + 0.35, z + 0.1, x + 0.9, y + 1, z + 0.9];
+      // an item frame's outline IS its hitbox: you punch it to pop the item back out
+      case 'iframe': return frameWorldBox(x, y, z, this.getData(x, y, z) & 7);
+      case 'wall_sign': {
+        const f = this.getData(x, y, z) & 3, t = 0.16;
+        if (f === 0) return [x, y + 0.18, z + 1 - t, x + 1, y + 0.82, z + 1];
+        if (f === 2) return [x, y + 0.18, z, x + 1, y + 0.82, z + t];
+        if (f === 1) return [x, y + 0.18, z, x + t, y + 0.82, z + 1];
+        return [x + 1 - t, y + 0.18, z, x + 1, y + 0.82, z + 1];
+      }
       case 'trapdoor': return this.trapdoorBox(x, y, z);
       // one outline around the whole pane instead of the post and every arm separately
       case 'pane': {
@@ -4992,6 +5354,10 @@ const Mesher = {
           case 'stairs': this.emitStairs(world, def, x, y, z, data); break;
           case 'fence': this.emitFence(world, def, x, y, z); break;
           case 'pane': this.emitPane(world, def, x, y, z); break;
+          case 'pot': this.emitPot(world, def, x, y, z, data); break;
+          case 'sign': this.emitSign(world, def, x, y, z, data, false); break;
+          case 'wall_sign': this.emitSign(world, def, x, y, z, data, true); break;
+          case 'iframe': this.emitItemFrame(world, def, x, y, z, data); break;
           case 'trapdoor': this.emitTrapdoor(world, def, x, y, z, data); break;
           case 'gate': this.emitGate(world, def, x, y, z, data); break;
           case 'ladder': this.emitLadder(world, def, x, y, z, data); break;
@@ -5014,6 +5380,8 @@ const Mesher = {
 
   texFor(def, face, data) {
     const t = def.tex;
+    // dyed wool: data bits0-3 pick the tile (white keeps the plain 'wool' name)
+    if (def.colored) { const c = WOOL_COLORS[data & 15]; return (c && c.name !== 'white') ? 'wool_' + c.name : t.all; }
     if (t.all) return t.all;
     if (def.pillar) {
       // logs: the two faces on the axis show the rings, the rest shows bark
@@ -5197,7 +5565,7 @@ const Mesher = {
       if (f === 4 || f === 5) uvs = FACE_V[f].map(cv => [cv[0] === 1 ? x1 : x0, cv[2] === 1 ? z1 : z0]);
       else if (f === 0 || f === 2) uvs = FACE_V[f].map(cv => [cv[0] === 1 ? x1 : x0, 1 - (cv[1] === 1 ? y1 : y0)]);
       else uvs = FACE_V[f].map(cv => [cv[2] === 1 ? z1 : z0, 1 - (cv[1] === 1 ? y1 : y0)]);
-      this.litQuad(world, def, P, this.texFor(def, f, opts.data || 0), uvs, f, x, y, z);
+      this.litQuad(world, def, P, opts.tex || this.texFor(def, f, opts.data || 0), uvs, f, x, y, z);
     }
   },
   // horizontal quad at height y+yy covering [x0,z0]..[x1,z1]; f = 4 (up) or 5 (down)
@@ -5282,6 +5650,136 @@ const Mesher = {
     if (c[1]) arm(1, 1, 0, b, a, 1, b);
     if (c[2]) arm(2, 0, 1, a, b, b, 1);
     if (c[3]) arm(3, -1, 0, 0, a, a, b);
+  },
+  // flower pot: four terracotta walls around a dirt core, plus the plant it holds.
+  // The walls are separate boxes (not one hollow cube) so you can see the soil inside.
+  emitPot(world, def, x, y, z, data) {
+    const s = 1 / 16, h = 6 * s;
+    const a = 5 * s, b = 11 * s, i0 = 6 * s, i1 = 10 * s;
+    this.emitSubBox(world, def, x, y, z, a, 0, a, i0, h, b);   // -x wall
+    this.emitSubBox(world, def, x, y, z, i1, 0, a, b, h, b);   // +x wall
+    this.emitSubBox(world, def, x, y, z, i0, 0, a, i1, h, i0); // -z wall
+    this.emitSubBox(world, def, x, y, z, i0, 0, i1, i1, h, b); // +z wall
+    this.emitSubBox(world, def, x, y, z, i0, 0, i0, i1, 4 * s, i1, { tex: 'dirt' }); // soil
+    const p = POTTED[data & 15];
+    if (!p) return;
+    if (p.cube) { // a potted cactus is a little box, not a cross
+      this.emitSubBox(world, def, x, y, z, 6.5 * s, 4 * s, 6.5 * s, 9.5 * s, 13 * s, 9.5 * s, { tex: p.tex });
+      return;
+    }
+    // the plant: the normal cross quads, shrunk and lifted so they sit in the soil
+    const uv = [[0, 1], [1, 1], [1, 0], [0, 0]];
+    const y0 = y + 4 * s, y1 = y + 15 * s, c0 = 0.22, c1 = 0.78;
+    const q1 = [[x + c0, y0, z + c0], [x + c1, y0, z + c1], [x + c1, y1, z + c1], [x + c0, y1, z + c0]];
+    const q2 = [[x + c1, y0, z + c0], [x + c0, y0, z + c1], [x + c0, y1, z + c1], [x + c1, y1, z + c0]];
+    for (const q of [q1, q2]) {
+      this.litQuad(world, def, q, p.tex, uv, -1, x, y, z);
+      this.litQuad(world, def, [q[1], q[0], q[3], q[2]], p.tex, uv, -1, x, y, z);
+    }
+  },
+  // ---------- signs ----------
+  // Both kinds are the same board, just placed differently: a standing sign sits on a post
+  // and can face any of 16 directions, a wall sign hangs flat against the block behind it.
+  // Everything is built from a centre point + a "right" and "up" vector so the rotated case
+  // needs no extra code — including the text, which is laid out in that same 2D frame.
+  emitSign(world, def, x, y, z, data, wall) {
+    const s = 1 / 16;
+    let ang, cy, dep;
+    if (wall) {
+      // data = the direction the face points: 0:-z 1:+x 2:+z 3:-x. The board's BACK sits
+      // flush against the wall behind it, so dep = -(0.5 - halfThickness).
+      ang = [0, -Math.PI / 2, Math.PI, Math.PI / 2][data & 3];
+      cy = y + 0.5; dep = -7 * s;
+    } else {
+      ang = signAngle(data);
+      cy = y + 11 * s; dep = 0;
+      // post: a 2x2 stick from the ground up to the board
+      this.emitSubBox(world, def, x, y, z, 7 * s, 0, 7 * s, 9 * s, 6 * s, 9 * s);
+    }
+    const rx = Math.cos(ang), rz = -Math.sin(ang);     // "right" along the board
+    const nx = -Math.sin(ang), nz = -Math.cos(ang);    // the way the face points
+    const ccx = x + 0.5 + nx * dep, ccz = z + 0.5 + nz * dep;
+    const hw = 8 * s, hh = 5 * s, t = 1 * s;           // 16x10x2 px board, like vanilla
+    // the board: front, back and the four edges, as an oriented box
+    const P = (u, v, w) => [ccx + rx * u + nx * w, cy + v, ccz + rz * u + nz * w];
+    // a..d are listed bottom-left → bottom-right → top-right → top-left as seen from OUTSIDE
+    // the face, which walks the ring clockwise — the opposite of the CCW winding
+    // gl.cullFace(BACK) keeps. Every board face was therefore culled and you looked straight
+    // through the sign. Feed the reversed ring, each corner keeping its own UV.
+    const face = (a, b, c, d, sh) => this.litQuad(world, def, [b, a, d, c], def.tex.all,
+      [[1, 1], [0, 1], [0, 0], [1, 0]], -1, x, y, z, { shade: sh });
+    face(P(-hw, -hh, t), P(hw, -hh, t), P(hw, hh, t), P(-hw, hh, t), 1);        // front
+    face(P(hw, -hh, -t), P(-hw, -hh, -t), P(-hw, hh, -t), P(hw, hh, -t), 0.8);  // back
+    face(P(-hw, hh, t), P(hw, hh, t), P(hw, hh, -t), P(-hw, hh, -t), 1);        // top
+    face(P(-hw, -hh, -t), P(hw, -hh, -t), P(hw, -hh, t), P(-hw, -hh, t), 0.6);  // bottom
+    face(P(hw, -hh, t), P(hw, -hh, -t), P(hw, hh, -t), P(hw, hh, t), 0.85);     // right edge
+    face(P(-hw, -hh, -t), P(-hw, -hh, t), P(-hw, hh, t), P(-hw, hh, -t), 0.85); // left edge
+    const be = world.blockEntities.get(x + ',' + y + ',' + z);
+    // Front only. A second copy on the back showed through wherever a glyph reached past
+    // the board's edge, which read as doubled-up garbage around the sign.
+    if (be && be.lines) this.emitSignText(world, def, x, y, z, be.lines, P, t, 1);
+  },
+  // 4 lines of text laid into the board's own 2D frame; one quad per character, UV-cropped
+  // to the glyph's real width so the spacing matches the 2D font exactly.
+  // Front of the board only — `side` is always +1 now, kept as a parameter so the depth
+  // offset reads clearly.
+  emitSignText(world, def, x, y, z, lines, P, t, side) {
+    const uvQ = (cols) => [[0, 8 / 16], [cols / 16, 8 / 16], [cols / 16, 0], [0, 0]];
+    // Proud of the board by a third of a pixel. It has to be this much: the depth buffer's
+    // resolution a few blocks out is coarser than a sub-millimetre offset, so a smaller
+    // gap let the board win the depth test and the text vanished entirely.
+    const d = side * (t + 0.02);
+    const o = { shade: 1, tint: [0.12, 0.09, 0.05] };
+    const lineH = 10 * SIGN_PX;
+    for (let li = 0; li < SIGN_LINES; li++) {
+      const text = (lines[li] || '').slice(0, SIGN_MAX_CHARS);
+      if (!text) continue;
+      // A line of wide characters is still wider than the board even at the base size, so
+      // squeeze just that line until it fits — otherwise the glyphs run off both edges.
+      const full = Font.width(text) * SIGN_PX;
+      const px = full > SIGN_TEXT_W ? SIGN_PX * (SIGN_TEXT_W / full) : SIGN_PX;
+      let u = -Font.width(text) * px / 2;                 // centred, like vanilla
+      const v = (1.5 - li) * lineH - 4 * SIGN_PX;         // baseline of this line
+      for (const ch of text) {
+        if (ch === ' ') { u += 4 * px; continue; }
+        const cols = glyphCols(ch);
+        if (!cols) { u += 6 * px; continue; }
+        const w = cols * px, h = 8 * px;
+        // the board's local "right" points screen-LEFT when you face its front, so the
+        // line is laid out along -u
+        this.litQuad(world, def, [P(-u, v, d), P(-(u + w), v, d), P(-(u + w), v + h, d), P(-u, v + h, d)],
+          glyphTex(ch), uvQ(cols), -1, x, y, z, o);
+        u += (cols + 1) * px;
+      }
+    }
+  },
+  // item frame: a thin panel flat against the block it hangs on. `data` is a FACE_N index,
+  // so all six sides work — walls, a floor, and the underside of a block.
+  emitItemFrame(world, def, x, y, z, data) {
+    const f = data & 7;
+    const t = ITEM_FRAME_T;
+    this.emitSubBox(world, def, x, y, z, ...frameBox(f));
+    // the displayed stack: a flat sprite on the front, turned 90° per right-click. Drawing
+    // it here (instead of as an entity) keeps it in the chunk mesh — no extra draw calls.
+    const be = world.blockEntities.get(x + ',' + y + ',' + z);
+    if (!be || !be.item) return;
+    const it = Items[be.item.id];
+    if (!it) return;
+    const tex = it.icon || (it.block !== undefined && Blocks[it.block]
+      ? (Blocks[it.block].tex.all || Blocks[it.block].tex.side) : 'missing');
+    const n = FACE_N[f];
+    const [r, up] = frameAxes(f);
+    const h = 5 / 16;   // half size of the sprite
+    // The frame is mounted on the block BEHIND it (at -n), so its front face sits `t` out
+    // from that block — i.e. at centre + n*(t - 0.5), not centre + n*(0.5 - t).
+    const d = t + 0.002 - 0.5;
+    const c = [x + 0.5 + n[0] * d, y + 0.5 + n[1] * d, z + 0.5 + n[2] * d];
+    const P = (a, b) => [c[0] + r[0] * a + up[0] * b, c[1] + r[1] * a + up[1] * b, c[2] + r[2] * a + up[2] * b];
+    const corners = [P(-h, -h), P(h, -h), P(h, h), P(-h, h)];
+    const uv = [[0, 1], [1, 1], [1, 0], [0, 0]];
+    const rot = (be.rot || 0) & 3;
+    const turned = [uv[rot], uv[(rot + 1) & 3], uv[(rot + 2) & 3], uv[(rot + 3) & 3]];
+    this.litQuad(world, def, corners, tex, turned, -1, x, y, z, { shade: 1 });
   },
   emitTrapdoor(world, def, x, y, z, data) {
     const t = 0.1875, f = data & 3;
@@ -6233,14 +6731,17 @@ const Renderer = {
       gl.drawElements(gl.TRIANGLES, g.boxes[i].count, gl.UNSIGNED_INT, g.boxes[i].start * 4);
     }
   },
-  // mini block (dropped/held): unit cube centered origin with block textures
-  getMiniBlock(id) {
-    let g = this.miniBlockCache[id];
+  // mini block (dropped/held): unit cube centered origin with block textures.
+  // `data` matters for blocks whose texture depends on it (dyed wool, log axis) — it is
+  // part of the cache key, otherwise every colour would share the first one built.
+  getMiniBlock(id, data = 0) {
+    const key = data ? id + ':' + data : id;
+    let g = this.miniBlockCache[key];
     if (g) return g;
     const def = Blocks[id];
     const V = [], I = [];
     for (let f = 0; f < 6; f++) {
-      const tex = Mesher.texFor(def, f, 0);
+      const tex = Mesher.texFor(def, f, data);
       const [u0, v0] = Mesher.uvRect(tex);
       const base = V.length / 10;
       for (let ci = 0; ci < 4; ci++) {
@@ -6260,7 +6761,7 @@ const Renderer = {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(V), gl.STATIC_DRAW);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, g.ibo);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(I), gl.STATIC_DRAW);
-    this.miniBlockCache[id] = g;
+    this.miniBlockCache[key] = g;
     return g;
   },
   // multi-box model (boats, minecarts): boxes textured from atlas tiles, one draw call
@@ -8892,10 +9393,10 @@ function drawEntities(world, game, dt) {
       const m = Mat4.create();
       Mat4.translate(m, e.x, e.y + bob, e.z);
       Mat4.rotY(m, e.age * 1.1);
-      if (it && it.block !== undefined && Blocks[it.block] && Blocks[it.block].model !== 'cross' && Blocks[it.block].model !== 'crop' && Blocks[it.block].model !== 'rail') {
+      if (it && it.block !== undefined && Blocks[it.block] && !blockIsFlat(it.block)) {
         Mat4.scale(m, 0.25, 0.25, 0.25);
         Mat4.translate(m, 0, 0.5, 0);
-        R.drawGeo(R.getMiniBlock(it.block), m, light, R.atlasTex);
+        R.drawGeo(R.getMiniBlock(it.block, it.blockData || 0), m, light, R.atlasTex);
       } else {
         const tex = it && it.icon ? it.icon : (it && it.block !== undefined ? (Blocks[it.block].tex.all || Blocks[it.block].tex.side) : 'missing');
         Mat4.scale(m, 0.36, 0.36, 0.36);
@@ -8940,7 +9441,7 @@ function drawEntities(world, game, dt) {
     } else if (e.type === 'falling_block') {
       const m = Mat4.create();
       Mat4.translate(m, e.x, e.y + 0.49, e.z);
-      R.drawGeo(R.getMiniBlock(e.blockId), m, light, R.atlasTex);
+      R.drawGeo(R.getMiniBlock(e.blockId, e.data || 0), m, light, R.atlasTex);
     } else if (e.type === 'boat') {
       const m = Mat4.create();
       Mat4.translate(m, e.x, e.y + 0.02, e.z);
@@ -9477,6 +9978,11 @@ class Player {
     if (!hit) { this.mining = null; return; }
     const id = this.world.getBlock(hit.x, hit.y, hit.z);
     if (id === B.AIR) { this.mining = null; return; }
+    // a filled frame gives up its item first; holding the button must not then break it
+    if (id === B.ITEM_FRAME) {
+      const be = this.world.blockEntities.get(hit.x + ',' + hit.y + ',' + hit.z);
+      if (be && be.item) { this.mining = null; this.swingLoop = true; return; }
+    }
     const def = Blocks[id];
     // creative: instant break (even bedrock), short cooldown while holding
     if (this.game.mode === 'creative') {
@@ -9550,9 +10056,31 @@ class Player {
   }
 
   // ---------- attack (left click press) ----------
+  // Punching a filled item frame takes the item back out and leaves the frame standing —
+  // vanilla behaviour, and the only way to retrieve something without breaking the frame.
+  // Returns true when it handled the click (so mining must not start).
+  tryPopItemFrame() {
+    const w = this.world;
+    const dir = this.lookDir(), eye = this.eyePos();
+    const hit = w.raycast(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], 4.5);
+    if (!hit || w.getBlock(hit.x, hit.y, hit.z) !== B.ITEM_FRAME) return false;
+    const be = w.blockEntities.get(hit.x + ',' + hit.y + ',' + hit.z);
+    if (!be || !be.item) return false;                  // empty frame: let it be mined
+    const stack = mkStack(be.item.id, 1);
+    be.item = null; be.rot = 0;
+    if (this.game.mode !== 'creative') {
+      if (this.inventory.add(stack) > 0) spawnItemEntity(w, hit.x + 0.5, hit.y + 0.5, hit.z + 0.5, stack, true);
+    }
+    this.game.mpSendFrame(hit.x, hit.y, hit.z);
+    w.markMeshDirty(hit.x, hit.y, hit.z);
+    Sfx.play('pop', { pos: [hit.x, hit.y, hit.z], pitch: 0.8 });
+    this.useCd = 0.25;
+    return true;
+  }
   attackPress() {
     if (this.deadFlag) return;
     this.swingNow();
+    if (this.tryPopItemFrame()) return;
     const dir = this.lookDir();
     // entity hit first
     const target = this.pickEntity(3.2);
@@ -9756,6 +10284,49 @@ class Player {
     }
     if (id === B.BED) {
       g.trySleep(hit.x, hit.y, hit.z);
+      return true;
+    }
+    // Signs stay editable after placing. Vanilla 1.8 locks them, but this build is played
+    // on a phone where a typo means breaking and re-crafting, so right-click re-opens it.
+    if (id === B.SIGN || id === B.WALL_SIGN) {
+      g.openSign(hit.x, hit.y, hit.z);
+      return true;
+    }
+    if (id === B.ITEM_FRAME) {
+      const be = g.frameBE(hit.x, hit.y, hit.z);
+      const held = this.heldItem();
+      if (be.item) {                                    // full → turn it a quarter turn
+        be.rot = ((be.rot || 0) + 1) & 3;
+        g.mpSendFrame(hit.x, hit.y, hit.z);
+        w.markMeshDirty(hit.x, hit.y, hit.z);
+        Sfx.play('click', { pos: [hit.x, hit.y, hit.z], pitch: 1.2 });
+        return true;
+      }
+      if (!held) return true;                           // empty hand on an empty frame: nothing
+      be.item = { id: held.id, n: 1 };
+      be.rot = 0;
+      if (this.game.mode !== 'creative') this.consumeHeld();
+      g.mpSendFrame(hit.x, hit.y, hit.z);
+      w.markMeshDirty(hit.x, hit.y, hit.z);
+      Sfx.play('pop', { pos: [hit.x, hit.y, hit.z] });
+      return true;
+    }
+    if (id === B.FLOWER_POT) {
+      const d = w.getData(hit.x, hit.y, hit.z) & 15;
+      if (d) { // full → take the plant back out
+        const p = POTTED[d];
+        w.setBlock(hit.x, hit.y, hit.z, B.FLOWER_POT, 0, { noUpdate: true });
+        const s = mkStack(p.item, 1);
+        if (this.inventory.add(s) > 0) spawnItemEntity(w, hit.x + 0.5, hit.y + 0.6, hit.z + 0.5, s, true);
+        Sfx.play('dig_grass', { pos: [hit.x, hit.y, hit.z] });
+        return true;
+      }
+      const held = this.heldItem();                       // empty → plant what we hold
+      const pd = held && POT_DATA_FOR[held.id];
+      if (!pd) return false;                              // nothing plantable: fall through to placing
+      w.setBlock(hit.x, hit.y, hit.z, B.FLOWER_POT, pd, { noUpdate: true });
+      if (this.game.mode !== 'creative') this.consumeHeld();
+      Sfx.play('place_grass', { pos: [hit.x, hit.y, hit.z] });
       return true;
     }
     if (id === B.END_PORTAL_FRAME) {
@@ -9981,7 +10552,11 @@ class Player {
     }
     let data = 0;
     const facing = this.getFacing();
+    // dyed wool (and anything else that is one block with several item ids) carries its
+    // data value on the item
+    if (it.blockData !== undefined) data = it.blockData;
     // support requirements + orientation
+    if (bid === B.FLOWER_POT && !blockSolidTop(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz))) return;
     if (bid === B.TORCH || bid === B.REDSTONE_TORCH) {
       if (hit.face === 5) return;
       if (hit.face === 4) data = 0;
@@ -10088,6 +10663,33 @@ class Player {
     }
     if (bid === B.SNOW_LAYER || bid === B.SAND || bid === B.GRAVEL) {
       // fine as-is (sand/gravel fall check will run)
+    }
+    // a sign becomes a standing sign on a floor and a wall sign on a wall (one item, like
+    // vanilla). Standing signs take one of 16 rotations so the face turns toward you.
+    if (bid === B.SIGN) {
+      if (hit.face === 5) return;                       // can't hang one off a ceiling
+      if (hit.face === 4) {
+        if (!blockSolidTop(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz))) return;
+        data = Math.round((Math.PI - this.yaw) / (Math.PI / 8)) & 15;
+      } else {
+        const wall = Blocks[w.getBlock(px - FACE_N[hit.face][0], py, pz - FACE_N[hit.face][2])];
+        if (!wall || !wall.opaque) return;
+        w.setBlock(px, py, pz, B.WALL_SIGN, hit.face);
+        this.game.openSign(px, py, pz);
+        this.afterPlace(held, bdef, px, py, pz);
+        return;
+      }
+      w.setBlock(px, py, pz, B.SIGN, data);
+      this.game.openSign(px, py, pz);
+      this.afterPlace(held, bdef, px, py, pz);
+      return;
+    }
+    if (bid === B.ITEM_FRAME) {
+      // any of the six sides — a wall, the top of a block, or the underside of one
+      const n = FACE_N[hit.face];
+      const sup = Blocks[w.getBlock(px - n[0], py - n[1], pz - n[2])];
+      if (!sup || !sup.opaque) return;
+      data = hit.face;
     }
     w.setBlock(px, py, pz, bid, data);
     this.afterPlace(held, bdef, px, py, pz);
@@ -10548,6 +11150,7 @@ const UI = {
   mpCode: '', mpFocus: 'code',
   mpNotice: '', // why we're back on the join screen (host quit, connection lost...)
   creativeScroll: 0, creativeItems: null,
+  signBE: null, signLine: 0, signLineRects: null,   // sign editor state
   toasts: [], messages: [],
   itemNameT: 0, itemNameTxt: '',
   optionsBack: 'pause',
@@ -10664,6 +11267,8 @@ const UI = {
   openFurnace(be) { this.screen = 'furnace'; this.furnaceBE = be; Game.releasePointer(); },
   openChest(be, large) { this.screen = 'chest'; this.chestBE = be; this.chestLarge = !!large; Game.releasePointer(); },
   closeScreen() {
+    // the sign editor has its own teardown (commit the text + remesh + tell the room)
+    if (this.screen === 'sign') { Game.closeSign(); if (Game.state === 'play') Game.requestPointer(); return; }
     // creative: items are infinite, so just drop whatever is on the cursor
     if (this.screen === 'creative') {
       this.cursorStack = null;
@@ -10926,6 +11531,21 @@ const UI = {
       this.clickSliders();
       return this.clickButtons();
     }
+    if (this.screen === 'sign') {
+      // tapping a line selects it (and re-points the phone keyboard at that line)
+      const rs = this.signLineRects;
+      if (rs) for (let i = 0; i < rs.length; i++) {
+        const r = rs[i];
+        if (r && this.mx >= r[0] && this.mx < r[0] + r[2] && this.my >= r[1] && this.my < r[1] + r[3]) {
+          this.signLine = i;
+          if (typeof Mobile !== 'undefined' && Mobile.enabled) {
+            if (Mobile.kbTarget === 'sign') Mobile.syncSignLine(); else Mobile.openKeyboard('sign');
+          }
+          return true;
+        }
+      }
+      return this.clickButtons();
+    }
     if (this.screen !== 'none') {
       const slots = this.activeSlots();
       for (const s of slots) {
@@ -11025,6 +11645,7 @@ const UI = {
       if (this.screen === 'inventory' || this.screen === 'crafting') return this.drawContainer(game);
       if (this.screen === 'furnace') return this.drawFurnace(game);
       if (this.screen === 'chest') return this.drawChest(game);
+      if (this.screen === 'sign') return this.drawSignEdit(game);
       if (this.screen === 'creative') return this.drawCreative(game);
     }
   },
@@ -11129,7 +11750,9 @@ const UI = {
     // pixel is differenced exactly once (no stray dark dot). Both rects share the same
     // centre pixel (cxp,cyp) and reach 4px each way, so the cross is perfectly symmetric.
     const ctx = this.ctx;
-    const hideCross = typeof Mobile !== 'undefined' && Mobile.enabled && Mobile.layout && !Mobile.layout.crosshair;
+    // hidden by the touch layout option, and always in third person (like vanilla)
+    const hideCross = game.viewMode ||
+      (typeof Mobile !== 'undefined' && Mobile.enabled && Mobile.layout && !Mobile.layout.crosshair);
     if (!hideCross) {
       ctx.save();
       ctx.globalCompositeOperation = 'difference';
@@ -11662,6 +12285,31 @@ const UI = {
       this.textC('Off = keyboard/mouse mode. The pause button stays tappable.', W / 2, H * 0.25 + 104, '#c8c8c8');
     this.button('options_done', W / 2 - 100, H * 0.78, 200, 'Done');
   },
+  // sign editor: four lines, the one being typed is highlighted with a blinking caret.
+  // Tapping a line on a phone selects it (the soft keyboard stays up the whole time).
+  drawSignEdit(game) {
+    this.dimBg(0.7);
+    const W = this.W(), H = this.H();
+    const be = this.signBE;
+    if (!be) { this.screen = 'none'; return; }
+    this.textC('Edit Sign', W / 2, H * 0.2);
+    const bw = 180, bh = 62, bx = W / 2 - bw / 2, by = H * 0.32;
+    this.rect(bx - 2, by - 2, bw + 4, bh + 4, '#5a4728');
+    this.rect(bx, by, bw, bh, '#9a7c50');
+    for (let i = 0; i < SIGN_LINES; i++) {
+      const line = be.lines[i] || '';
+      const sel = i === this.signLine;
+      const ly = by + 5 + i * 14;
+      if (sel) this.rect(bx + 2, ly - 2, bw - 4, 13, '#b08f5e');
+      const caret = sel && (Math.floor(performance.now() / 400) % 2 === 0) ? '_' : '';
+      this.textC(line + caret, W / 2, ly + 1, '#241a0e', false);
+      this.signLineRects = this.signLineRects || [];
+      this.signLineRects[i] = [bx, ly - 2, bw, 13];
+    }
+    this.textC('Line ' + (this.signLine + 1) + '/' + SIGN_LINES + '  -  Enter/Tab = next line', W / 2, by + bh + 10, '#c8c8c8');
+    this.textC('max ' + SIGN_MAX_CHARS + ' characters per line', W / 2, by + bh + 21, '#a0a0a0');
+    this.button('sign_done', W / 2 - 100, H * 0.72, 200, 'Done');
+  },
   drawControls(game) {
     this.dimBg(0.6);
     const W = this.W(), H = this.H();
@@ -11672,7 +12320,8 @@ const UI = {
       ['E', 'Inventory'], ['Q', 'Drop item'], ['1-9 / Wheel', 'Select hotbar slot'],
       ['T or /', 'Chat / Commands'], ['Tab', 'Complete command'],
       ['Space x2', 'Fly (Creative)'],
-      ['Esc', 'Pause / Close'], ['F3', 'Debug info'], ['F11', 'Fullscreen'],
+      ['Esc', 'Pause / Close'], ['F3', 'Debug info'], ['F4', 'Change view (1st / 3rd)'],
+      ['F11', 'Fullscreen'],
     ];
     L.forEach(([k, v], i) => {
       const y = H * 0.2 + i * 11;
@@ -12279,12 +12928,13 @@ const Mobile = {
     fly:    { nx: 0.775, ny: 0.10, rmul: 0.95, kind: 'toggle', glyph: 'fly', creative: true },
     pause:  { nx: 0.045, ny: 0.09, rmul: 0.85, kind: 'tap', glyph: 'pause' },
     chat:   { nx: 0.135, ny: 0.09, rmul: 0.85, kind: 'tap', glyph: 'chat' },
+    view:   { nx: 0.225, ny: 0.09, rmul: 0.85, kind: 'tap', glyph: 'eye' },
   },
   BASE_R: 34,   // base button radius in CSS px (before rmul * layout.size)
 
   order() {
     // draw/hit order (later = on top); pause & utility first, action buttons last
-    return ['move', 'pause', 'chat', 'inv', 'drop', 'fly', 'sprint', 'sneak', 'use', 'break', 'jump'];
+    return ['move', 'pause', 'chat', 'view', 'inv', 'drop', 'fly', 'sprint', 'sneak', 'use', 'break', 'jump'];
   },
 
   defaultLayout() {
@@ -12524,6 +13174,7 @@ const Mobile = {
         this.active.chat = false;
         if (typeof Chat !== 'undefined' && UI.screen === 'none') { Chat.openChat(''); this.openKeyboard('chat'); }
         break;
+      case 'view': this.active.view = false; this.game.cycleView(); break;
     }
     if (typeof Sfx !== 'undefined' && (this.DEFS[idc].kind === 'tap' || idc === 'sprint')) Sfx.play('click');
   },
@@ -12655,7 +13306,9 @@ const Mobile = {
     else if (target === 'seed') el.value = UI.seedInput || '';
     else if (target === 'mpcode') el.value = UI.mpCode || '';
     else if (target === 'mpname') el.value = Game.mpName || '';
-    el.maxLength = target === 'chat' ? 100 : (target === 'mpcode' ? 6 : (target === 'mpname' ? 16 : 24));
+    else if (target === 'sign') el.value = (UI.signBE && UI.signBE.lines[UI.signLine]) || '';
+    el.maxLength = target === 'chat' ? 100
+      : target === 'mpcode' ? 6 : target === 'mpname' ? 16 : target === 'sign' ? SIGN_MAX_CHARS : 24;
     el.inputMode = target === 'mpcode' ? 'numeric' : 'text';
     el.setAttribute('enterkeyhint', target === 'chat' ? 'send' : (target === 'mpcode' ? 'go' : 'done'));
     // focus must run inside the same user gesture for iOS to raise the keyboard
@@ -12669,6 +13322,13 @@ const Mobile = {
     else if (this.kbTarget === 'seed') { UI.seedInput = v.slice(0, 24); }
     else if (this.kbTarget === 'mpcode') { UI.mpCode = v.replace(/[^0-9]/g, '').slice(0, 6); }
     else if (this.kbTarget === 'mpname') { Game.mpName = v.slice(0, 16); Game.mpSaveName(); }
+    else if (this.kbTarget === 'sign' && UI.signBE) { UI.signBE.lines[UI.signLine] = v.slice(0, SIGN_MAX_CHARS); }
+  },
+  // the hidden <input> only ever holds ONE line, so switching lines has to reload it
+  syncSignLine() {
+    if (this.kbTarget !== 'sign' || !this.kbEl || !UI.signBE) return;
+    this.kbEl.value = UI.signBE.lines[UI.signLine] || '';
+    try { this.kbEl.setSelectionRange(this.kbEl.value.length, this.kbEl.value.length); } catch (e) {}
   },
   onKbKeydown(e) {
     if (e.key === 'Enter') {
@@ -12676,6 +13336,8 @@ const Mobile = {
       if (this.kbTarget === 'chat') { Chat.submit(); this.closeKeyboard(); }
       else if (this.kbTarget === 'mpcode') { this.closeKeyboard(); this.game.onButton('mp_join'); }
       else if (this.kbTarget === 'mpname') { this.closeKeyboard(); UI.mpFocus = 'code'; }
+      // Enter on a sign moves to the next line instead of closing (4 lines, one keyboard)
+      else if (this.kbTarget === 'sign') { UI.signLine = (UI.signLine + 1) % SIGN_LINES; this.syncSignLine(); }
       else { this.closeKeyboard(); this.game.onButton('create_go'); }
     }
   },
@@ -12785,6 +13447,16 @@ const Mobile = {
       ctx.lineTo(cx - a * 0.35, y0 + h + a * 0.45);
       ctx.lineTo(cx + a * 0.15, y0 + h);
       ctx.fill();
+    } else if (g === 'eye') {
+      // eye = change view (first / third person)
+      ctx.lineWidth = Math.max(2, r * 0.1);
+      const w = a * 1.5, h = a * 0.95;
+      ctx.beginPath();
+      ctx.moveTo(cx - w / 2, cy);
+      ctx.quadraticCurveTo(cx, cy - h, cx + w / 2, cy);
+      ctx.quadraticCurveTo(cx, cy + h, cx - w / 2, cy);
+      ctx.closePath(); ctx.stroke();
+      ctx.beginPath(); ctx.arc(cx, cy, a * 0.32, 0, Math.PI * 2); ctx.fill();
     } else {
       // text glyph via bitmap font
       const map = { mine: 'MINE', use: 'USE', bag: 'BAG', drop: 'DROP', fly: 'FLY', pause: 'II' };
@@ -12929,6 +13601,12 @@ const Game = {
   // remote player's sneak pose (values dialled in by Patrik with the F6 tuner)
   // dip = upper body drop, fwd = upper body shift forward (+z), tilt = torso rotation
   crouchPose: { dip: 0.26, tilt: 0.5, fwd: 0.25 },
+  // camera perspective, cycled with F4 (vanilla uses F5 — the browser steals that to
+  // reload the page). 0 = first person, 1 = third person behind, 2 = third person in
+  // front looking back at you. Persisted in localStorage so it survives a reload.
+  viewMode: 0,
+  camDist: 4.0,    // how far the third-person camera sits from the eye (vanilla is 4)
+  camDistCur: 4.0, // what it actually got, after walls pushed it in
   armThick: 5, // arm box width/depth in 1/16 units (vanilla default is 4); height stays 12
 
   // rebuilds the steve_arm box geometry at the current armThick and clears the cached
@@ -12970,6 +13648,7 @@ const Game = {
     // restore a previously uploaded skin
     try { const s = localStorage.getItem('mcpe_skin'); if (s) this.loadSkinDataURL(s, true); } catch (e) {}
     try { const n = parseInt(localStorage.getItem('mcpe_slots'), 10); if (n) this.mpSlots = clamp(n, 2, 10); } catch (e) {}
+    try { const v = parseInt(localStorage.getItem('mcpe_view'), 10); if (v >= 0 && v <= 2) this.viewMode = v; } catch (e) {}
     this.last = performance.now();
     requestAnimationFrame(() => this.loop());
   },
@@ -13088,6 +13767,8 @@ const Game = {
     Net.on('beClose', (m) => this.onBeClose(m));      // host: release the container lock
     Net.on('beState', (m) => this.onBeState(m));      // guest: authoritative container contents
     Net.on('beDeny', (m) => this.onBeDeny(m));        // guest: somebody else has it open
+    Net.on('sign', (m) => this.onRemoteSign(m));      // anyone: sign text was edited
+    Net.on('frame', (m) => this.onRemoteFrame(m));    // anyone: item frame filled/turned
     Net.on('chat', (m) => { const r = this.getRemote(m.from); UI.msg('<' + ((r && r.name) || 'Player') + '> ' + (m.text || '').slice(0, 200)); });
     Net.on('skin', (m) => { if (m.data) this.loadRemoteSkin(m.from, m.data); }); // another player's custom skin
     Net.on('env', (m) => this.onRemoteEnv(m));   // guest: host's authoritative time + weather
@@ -13574,6 +14255,75 @@ const Game = {
     this.beHold = performance.now() + 500;
     Net.send('beSet', { dim: this.world.dim, x: be.x, y: be.y, z: be.z, items: be.items }, 0);
   },
+  // ---- signs & item frames ----
+  // Both are plain block entities that everyone may edit, so there is no lock and no host
+  // authority: whoever changes one broadcasts the new state and every client applies it.
+  // (Chests need the lock because two people grabbing the same stack duplicates it — a sign
+  // just ends up with the last text typed, which is what you want.)
+  signBE(x, y, z) {
+    const k = this.beKey(x, y, z);
+    let be = this.world.blockEntities.get(k);
+    if (!be || be.type !== 'sign') {
+      be = { type: 'sign', x, y, z, lines: ['', '', '', ''] };
+      this.world.blockEntities.set(k, be);
+    }
+    if (!be.lines) be.lines = ['', '', '', ''];
+    return be;
+  },
+  frameBE(x, y, z) {
+    const k = this.beKey(x, y, z);
+    let be = this.world.blockEntities.get(k);
+    if (!be || be.type !== 'iframe') {
+      be = { type: 'iframe', x, y, z, item: null, rot: 0 };
+      this.world.blockEntities.set(k, be);
+    }
+    return be;
+  },
+  openSign(x, y, z) {
+    const be = this.signBE(x, y, z);
+    UI.signBE = be;
+    UI.signLine = 0;
+    UI.screen = 'sign';
+    this.releasePointer();
+    if (Mobile.enabled) Mobile.openKeyboard('sign');
+  },
+  closeSign() {
+    const be = UI.signBE;
+    UI.signBE = null;
+    if (UI.screen === 'sign') UI.screen = 'none';
+    if (Mobile.enabled && Mobile.kbTarget === 'sign') Mobile.closeKeyboard();
+    if (!be || !this.world) return;
+    this.world.markMeshDirty(be.x, be.y, be.z);
+    this.mpSendSign(be.x, be.y, be.z);
+  },
+  mpSendSign(x, y, z) {
+    if (!Net.connected || (!this.mpRole && !this.isGuest)) return;
+    const be = this.world.blockEntities.get(this.beKey(x, y, z));
+    if (!be || be.type !== 'sign') return;
+    Net.send('sign', { dim: this.world.dim, x, y, z, lines: be.lines });
+  },
+  onRemoteSign(m) {
+    if (!this.world || (m.dim && m.dim !== this.world.dim)) return;
+    const be = this.signBE(m.x, m.y, m.z);
+    be.lines = (m.lines || ['', '', '', '']).slice(0, SIGN_LINES)
+      .map(l => String(l || '').slice(0, SIGN_MAX_CHARS));
+    this.world.markMeshDirty(m.x, m.y, m.z);
+    // if that sign is open on our screen, show what the other player typed
+    if (UI.signBE && UI.signBE.x === m.x && UI.signBE.y === m.y && UI.signBE.z === m.z) UI.signBE = be;
+  },
+  mpSendFrame(x, y, z) {
+    if (!Net.connected || (!this.mpRole && !this.isGuest)) return;
+    const be = this.world.blockEntities.get(this.beKey(x, y, z));
+    if (!be || be.type !== 'iframe') return;
+    Net.send('frame', { dim: this.world.dim, x, y, z, item: be.item, rot: be.rot || 0 });
+  },
+  onRemoteFrame(m) {
+    if (!this.world || (m.dim && m.dim !== this.world.dim)) return;
+    const be = this.frameBE(m.x, m.y, m.z);
+    be.item = m.item || null;
+    be.rot = m.rot || 0;
+    this.world.markMeshDirty(m.x, m.y, m.z);
+  },
   // host: a guest wants a container
   onBeOpen(m) {
     if (this.mpRole !== 'host' || !this.world) return;
@@ -13944,12 +14694,27 @@ const Game = {
       held: held ? held.id : null, mine, sn: p.sneaking ? 1 : 0,
     });
   },
+  // typing on a sign (desktop). Mobile goes through Mobile.openKeyboard('sign') instead.
+  signKey(e) {
+    const be = UI.signBE;
+    if (!be) return;
+    const i = UI.signLine;
+    const cur = be.lines[i] || '';
+    if (e.code === 'Escape' || e.code === 'Enter' && e.ctrlKey) { this.closeSign(); return; }
+    if (e.code === 'Backspace') { be.lines[i] = cur.slice(0, -1); return; }
+    if (e.code === 'Enter' || e.code === 'Tab') { UI.signLine = (i + 1) % SIGN_LINES; return; }
+    if (e.code === 'ArrowUp') { UI.signLine = (i + SIGN_LINES - 1) % SIGN_LINES; return; }
+    if (e.code === 'ArrowDown') { UI.signLine = (i + 1) % SIGN_LINES; return; }
+    if (/^[\x20-\x7e]$/.test(e.key) && cur.length < SIGN_MAX_CHARS) be.lines[i] = cur + e.key;
+  },
   onKey(e, down) {
     // when the mobile on-screen keyboard is active, its hidden <input> owns text entry
     if (Mobile.enabled && Mobile.kbTarget) return;
     const code = e.code;
     if (down && code === 'F11') { e.preventDefault(); this.toggleFullscreen(); return; }
     if (down && code === 'F3') { e.preventDefault(); this.showDebug = !this.showDebug; return; }
+    // F4 = vanilla's F5 (the browser keeps F5 for reloading the page)
+    if (down && code === 'F4') { e.preventDefault(); this.cycleView(); return; }
     if (this.state === 'create' && down) {
       const field = UI.createFocus === 'seed' ? 'seedInput' : 'nameInput';
       if (code === 'Tab') UI.createFocus = UI.createFocus === 'seed' ? 'name' : 'seed';
@@ -13982,6 +14747,12 @@ const Game = {
       return;
     }
     if (!this.player) return;
+    // the sign editor captures all keys while it is open
+    if (UI.screen === 'sign' && UI.signBE) {
+      if (down) this.signKey(e);
+      e.preventDefault();
+      return;
+    }
     // chat captures all keys while open
     if (Chat.open) {
       if (down) Chat.onKey(e);
@@ -14100,6 +14871,7 @@ const Game = {
       case 'resume': UI.screen = 'none'; this.requestPointer(); break;
       case 'options': UI.optionsBack = 'pause'; UI.screen = 'options'; break;
       case 'controls': UI.screen = 'controls'; break;
+      case 'sign_done': this.closeSign(); break;
       case 'controls_done': UI.screen = this.state === 'play' ? 'pause' : 'none'; break;
       case 'options_done':
         if (UI.optionsBack === 'title') { UI.screen = 'none'; this.state = 'title'; }
@@ -14312,6 +15084,8 @@ const Game = {
         if (be.items) o.items = be.items;
         if (be.mob) o.mob = be.mob;
         if (be.burn) { o.burn = be.burn; o.burnMax = be.burnMax; o.cook = be.cook; }
+        if (be.lines) o.lines = be.lines;               // sign text
+        if (be.type === 'iframe') { o.item = be.item || null; o.rot = be.rot || 0; }
         return o;
       }),
       spawned: [...w.spawnedChunks],
@@ -14762,31 +15536,35 @@ const Game = {
   },
   drawRemotePlayer(w, r) {
     const modelName = (r.hasSkin && r.slot != null) ? 'steve_remote' + r.slot : 'steve';
-    const e = {
+    this.drawPlayerFigure(w, {
       type: modelName, model: modelName, x: r.dispX, y: r.dispY, z: r.dispZ, h: 1.8, w: 0.6,
       yaw: r.yaw, headYaw: r.yaw, headPitch: r.pitch, walkT: r.walkT, walkAmp: r.walkAmp, age: r.age,
       swing: r.swing == null ? 1 : r.swing, sneak: r.sn ? 1 : 0,
-    };
-    const model = MOB_MODELS[modelName];
+    }, r.held);
+  },
+  // shared by the remote players and (in third person) by ourselves
+  drawPlayerFigure(w, e, heldId) {
+    const model = MOB_MODELS[e.model];
     if (!model) return;
     const poses = [];
     model.pose(e, poses);
     const l = w.getLightPacked(floor(e.x), floor(clamp(e.y + 1.0, 0, 127)), floor(e.z));
     const light = [(l >> 4) / 15, (l & 15) / 15];
     Renderer.drawMob(e, poses, light, 0);
-    // item held in the remote player's right hand (poses[2] = their right arm bone)
-    if (r.held != null && Items[r.held] && poses[2]) {
+    // item held in the player's right hand (poses[2] = the right arm bone)
+    if (heldId != null && Items[heldId] && poses[2]) {
       const m = Mat4.copy(Mat4.create(), poses[2]);
       Mat4.translate(m, 0, -0.62, -0.06); // slide down the arm to the fist
-      const def = Items[r.held];
-      if (def.block !== undefined) {
+      const def = Items[heldId];
+      if (def.block !== undefined && !blockIsFlat(def.block)) {
         Mat4.rotX(m, 0.35);
         Mat4.scale(m, 0.30, 0.30, 0.30);
-        Renderer.drawGeo(Renderer.getMiniBlock(def.block), m, light, Renderer.atlasTex);
+        Renderer.drawGeo(Renderer.getMiniBlock(def.block, def.blockData || 0), m, light, Renderer.atlasTex);
       } else {
         Mat4.rotZ(m, -0.6); Mat4.rotY(m, Math.PI / 2);
+        const tex = def.icon || (def.block !== undefined ? (Blocks[def.block].tex.all || Blocks[def.block].tex.side) : 'missing');
         Mat4.scale(m, 0.55, 0.55, 0.55);
-        Renderer.drawGeo(Renderer.getSprite(def.icon || 'missing'), m, light, Renderer.atlasTex);
+        Renderer.drawGeo(Renderer.getSprite(tex), m, light, Renderer.atlasTex);
       }
     }
   },
@@ -14800,10 +15578,24 @@ const Game = {
     if (p.bowCharge >= 0) fov -= p.bowCharge * 12;
     this.curFovSmooth = lerp(this.curFovSmooth || fov, fov, dt * 10);
     Renderer.curFov = this.curFovSmooth;
-    Renderer.beginFrame(eye[0], eye[1], eye[2], p.yaw, p.pitch, this.curFovSmooth);
+    // third person (F4): pull the camera back along (or forward past) the look ray.
+    // Aiming/mining keeps using the EYE, exactly like vanilla — only the camera moves.
+    let cx = eye[0], cy = eye[1], cz = eye[2], cyaw = p.yaw, cpitch = p.pitch;
+    if (this.viewMode) {
+      const back = this.viewMode === 1;
+      const d = p.lookDir();
+      const dx = back ? -d[0] : d[0], dy = back ? -d[1] : d[1], dz = back ? -d[2] : d[2];
+      const dist = this.cameraBack(eye, dx, dy, dz, this.camDist);
+      this.camDistCur = dist;
+      cx = eye[0] + dx * dist; cy = eye[1] + dy * dist; cz = eye[2] + dz * dist;
+      // the front view looks the other way: turn 180° and invert the pitch
+      if (!back) { cyaw = p.yaw + Math.PI; cpitch = -p.pitch; }
+    }
+    Renderer.beginFrame(cx, cy, cz, cyaw, cpitch, this.curFovSmooth);
     Renderer.drawChunks(w, this.renderDist);
     drawEntities(w, this, dt);
     this.drawRemotePlayers(w);
+    if (this.viewMode) this.drawSelfPlayer(w);
     // every other player's mining progress (cracks on the block they're breaking)
     if (this.state === 'play') {
       for (const rp of this.remotes.values()) {
@@ -14827,8 +15619,73 @@ const Game = {
     Renderer.drawWater();
     Particles.draw(w);
     Weather.draw(w);
-    this.drawViewModel(dt);
+    if (!this.viewMode) this.drawViewModel(dt);
     this.chunkUpdates = 0;
+  },
+  // how far the third-person camera can back off before it would poke through a wall.
+  // Vanilla samples the corners of a small box; we cast the centre ray plus four
+  // slightly offset ones and take the shortest.
+  //
+  // The camera must NEVER end up inside a block: chunk meshing culls the faces between
+  // two solid blocks, so from inside a wall you look straight through it. That is why
+  // there is no minimum distance here — if a wall is right behind you the camera slides
+  // all the way back to the eye (effectively first person) instead of being forced into
+  // the wall, and camSolid() is a final guard that walks it in until the cell is open.
+  cameraBack(eye, dx, dy, dz, max) {
+    const w = this.world;
+    let best = max;
+    // vanilla samples the 8 corners of a small box around the ray, so a wall the centre
+    // ray slips past (an edge, a diagonal corner) still pushes the camera in
+    for (let i = 0; i < 8; i++) {
+      const ox = ((i & 1) * 2 - 1) * 0.1;
+      const oy = (((i >> 1) & 1) * 2 - 1) * 0.1;
+      const oz = (((i >> 2) & 1) * 2 - 1) * 0.1;
+      const hit = w.raycast(eye[0] + ox, eye[1] + oy, eye[2] + oz, dx, dy, dz, best);
+      if (hit) best = Math.min(best, Math.max(0, hit.t - 0.1));
+    }
+    // walk back toward the eye while the camera (or the box around it) is inside a block
+    while (best > 0 && this.camSolid(eye, dx, dy, dz, best)) best = Math.max(0, best - 0.1);
+    return best;
+  },
+  // is the camera box at `d` blocks along the ray sitting inside an opaque block?
+  camSolid(eye, dx, dy, dz, d) {
+    const w = this.world;
+    const x = eye[0] + dx * d, y = eye[1] + dy * d, z = eye[2] + dz * d;
+    for (let i = 0; i < 8; i++) {
+      const bx = floor(x + (((i & 1) * 2 - 1) * 0.1));
+      const by = floor(y + ((((i >> 1) & 1) * 2 - 1) * 0.1));
+      const bz = floor(z + ((((i >> 2) & 1) * 2 - 1) * 0.1));
+      const def = Blocks[w.getBlock(bx, by, bz)];
+      if (def && def.opaque) return true;
+    }
+    return false;
+  },
+  // F4 / touch "view" button: first person → third person behind → third person in front
+  cycleView() {
+    this.setViewMode((this.viewMode + 1) % 3);
+    UI.itemNameTxt = ['First Person', 'Third Person (back)', 'Third Person (front)'][this.viewMode];
+    UI.itemNameT = 1.4;
+  },
+  setViewMode(m) {
+    this.viewMode = m;
+    try { localStorage.setItem('mcpe_view', String(m)); } catch (e) {}
+  },
+  // our own body, only visible in third person. Same figure the other players see.
+  drawSelfPlayer(w) {
+    const p = this.player;
+    if (p.deadFlag) return;
+    // a wall squeezed the camera up against our own head — drawing the model here would
+    // just fill the screen with the inside of it
+    if (this.camDistCur < 0.55) return;
+    const modelName = this.hasSkin ? 'steve_self' : 'steve';
+    const held = p.heldItem();
+    this.drawPlayerFigure(w, {
+      type: modelName, model: modelName, x: p.x, y: p.y, z: p.z, h: 1.8, w: 0.6,
+      yaw: p.yaw, headYaw: p.yaw, headPitch: p.pitch,
+      // bobT/bobAmp already track walking distance & speed, so they drive the legs
+      walkT: p.bobT, walkAmp: p.bobAmp, age: 0,
+      swing: p.swing, sneak: p.sneaking ? 1 : 0,
+    }, held ? held.id : null);
   },
   drawViewModel(dt) {
     const p = this.player;
@@ -14852,14 +15709,19 @@ const Game = {
     // anchor the view model to the bottom-right corner regardless of window aspect
     const hw = Math.tan(31 * DEG) * (Renderer.canvas.width / Renderer.canvas.height);
     const m = Mat4.create();
-    if (held && Items[held.id].block !== undefined) {
+    // flat models (flowers, saplings, rails, the flower pot) are held as a sprite, like
+    // vanilla — only real cubes get the mini-block treatment
+    const heldBlock = held && Items[held.id].block !== undefined && !blockIsFlat(Items[held.id].block)
+      ? Items[held.id].block : null;
+    if (heldBlock !== null) {
       Mat4.translate(m, hw * 0.75 * 0.62 + bob, -0.55 + bobY2 - swingDip + eat * 0.3, -0.75);
       Mat4.rotY(m, 0.42 - swingRot * 0.35);
       Mat4.rotX(m, -swingRot * 0.5);
       Mat4.scale(m, 0.42, 0.42, 0.42);
-      Renderer.drawGeo(Renderer.getMiniBlock(Items[held.id].block), m, light, Renderer.atlasTex);
+      Renderer.drawGeo(Renderer.getMiniBlock(heldBlock, Items[held.id].blockData || 0), m, light, Renderer.atlasTex);
     } else if (held) {
-      let tex = Items[held.id].icon || 'missing';
+      const hb = Items[held.id].block;
+      let tex = Items[held.id].icon || (hb !== undefined ? (Blocks[hb].tex.all || Blocks[hb].tex.side) : 'missing');
       if (held.id === 'bow' && p.bowCharge >= 0) {
         tex = 'i_bow_pull_' + Math.min(2, floor(p.bowCharge * 3));
       }
