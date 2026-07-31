@@ -464,7 +464,9 @@ const POTTED = {
 const POT_DATA_FOR = {}; // item id → pot data value
 for (const d in POTTED) POT_DATA_FOR[POTTED[d].item] = +d;
 // models that are drawn as a flat sprite in the hand / as a dropped item, never as a cube
-const FLAT_MODELS = ['cross', 'crop', 'rail', 'pot'];
+// held / dropped as a flat item sprite instead of a mini cube — a bed belongs here, a cube of
+// blanket is not what you carry (and its block tiles are per-half, so there is no one cube tile)
+const FLAT_MODELS = ['cross', 'crop', 'rail', 'pot', 'bed'];
 function blockIsFlat(id) { const d = Blocks[id]; return !!(d && FLAT_MODELS.includes(d.model)); }
 
 // def fields:
@@ -510,7 +512,11 @@ defBlock(B.GRAVEL, { name: 'gravel', label: 'Gravel', tex: { all: 'gravel' }, ha
 defBlock(B.GOLD_ORE, { name: 'gold_ore', label: 'Gold Ore', tex: { all: 'gold_ore' }, hard: 3, tool: 'pickaxe', tier: 2 });
 defBlock(B.IRON_ORE, { name: 'iron_ore', label: 'Iron Ore', tex: { all: 'iron_ore' }, hard: 3, tool: 'pickaxe', tier: 1 });
 defBlock(B.COAL_ORE, { name: 'coal_ore', label: 'Coal Ore', tex: { all: 'coal_ore' }, hard: 3, tool: 'pickaxe', tier: 0, drops: drop1('coal'), xp: [0, 2] });
-defBlock(B.LOG, { name: 'log', label: 'Oak Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'log' }, pillar: true, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
+// Leaves you placed yourself are marked with this bit and never decay, like vanilla — otherwise
+// a hedge someone built would quietly evaporate. Worldgen leaves carry data 0 and do decay.
+const LEAF_PERSISTENT = 8;
+// `log: true` is what leaf decay looks for — leaves within 4 blocks of one of these stay put
+defBlock(B.LOG, { name: 'log', label: 'Oak Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'log' }, pillar: true, log: true, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
 defBlock(B.LEAVES, { name: 'leaves', label: 'Oak Leaves', tex: { all: 'leaves' }, opaque: false, cutout: true, leaves: true, hard: 0.2, sound: 'grass', opacity: 1, flammable: true, tint: 'foliage',
   drops: rng => { const d = []; if (rng.chance(0.05)) d.push({ id: 'sapling', n: 1 }); if (rng.chance(0.005)) d.push({ id: 'apple', n: 1 }); return d; } });
 defBlock(B.GLASS, { name: 'glass', label: 'Glass', tex: { all: 'glass' }, opaque: false, cutout: true, hard: 0.3, sound: 'glass', drops: () => [] });
@@ -534,7 +540,10 @@ defBlock(B.CHEST, { name: 'chest', label: 'Chest', tex: { top: 'chest_top', bott
 defBlock(B.DIAMOND_ORE, { name: 'diamond_ore', label: 'Diamond Ore', tex: { all: 'diamond_ore' }, hard: 3, tool: 'pickaxe', tier: 2, drops: drop1('diamond'), xp: [3, 7] });
 defBlock(B.CRAFTING_TABLE, { name: 'crafting_table', label: 'Crafting Table', tex: { top: 'crafting_table_top', bottom: 'planks', side: 'crafting_table_side', front: 'crafting_table_front' }, hard: 2.5, tool: 'axe', sound: 'wood', flammable: true });
 defBlock(B.FARMLAND, { name: 'farmland', label: 'Farmland', tex: { top: 'farmland', bottom: 'dirt', side: 'dirt' }, model: 'farmland', opaque: false, opacity: 15, hard: 0.6, tool: 'shovel', sound: 'gravel', drops: drop1('dirt') });
-defBlock(B.WHEAT_CROP, { name: 'wheat_crop', label: 'Crops', tex: { all: 'wheat' }, model: 'crop', solid: false, hard: 0, sound: 'grass', cutout: true,
+// There is no plain 'wheat' tile — only wheat_0..3, one per growth stage — so this needs texData
+// or anything going through Mesher.texFor (break particles) falls back to the magenta 'missing'.
+defBlock(B.WHEAT_CROP, { name: 'wheat_crop', label: 'Crops', tex: { all: 'wheat_3' }, model: 'crop', solid: false, hard: 0, sound: 'grass', cutout: true,
+  texData: data => 'wheat_' + Math.min(3, data >> 1),
   drops: (rng, tier, tool, data) => data >= 7 ? [{ id: 'wheat', n: 1 }, { id: 'seeds', n: rng.irange(1, 3) }] : [{ id: 'seeds', n: 1 }] });
 defBlock(B.FURNACE, { name: 'furnace', label: 'Furnace', tex: { top: 'furnace_top', bottom: 'furnace_top', side: 'furnace_side', front: 'furnace_front' }, hard: 3.5, tool: 'pickaxe', tier: 0 });
 defBlock(B.FURNACE_LIT, { name: 'furnace_lit', label: 'Furnace', tex: { top: 'furnace_top', bottom: 'furnace_top', side: 'furnace_side', front: 'furnace_front_lit' }, hard: 3.5, tool: 'pickaxe', tier: 0, lum: 13, drops: drop1('furnace') });
@@ -553,10 +562,10 @@ defBlock(B.NETHER_BRICK, { name: 'nether_brick', label: 'Nether Brick', tex: { a
 defBlock(B.END_STONE, { name: 'end_stone', label: 'End Stone', tex: { all: 'end_stone' }, hard: 3, tool: 'pickaxe', tier: 0 });
 defBlock(B.END_PORTAL_FRAME, { name: 'end_portal_frame', label: 'End Portal Frame', tex: { top: 'endframe_top', bottom: 'end_stone', side: 'endframe_side' }, model: 'frame', opaque: false, hard: -1, lum: 1, drops: () => [] });
 defBlock(B.END_PORTAL, { name: 'end_portal', label: 'End Portal', tex: { all: 'end_portal' }, model: 'endportal', solid: false, opaque: false, hard: -1, lum: 15, drops: () => [] });
-defBlock(B.SPRUCE_LOG, { name: 'spruce_log', label: 'Spruce Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'spruce_log' }, pillar: true, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
+defBlock(B.SPRUCE_LOG, { name: 'spruce_log', label: 'Spruce Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'spruce_log' }, pillar: true, log: true, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
 defBlock(B.SPRUCE_LEAVES, { name: 'spruce_leaves', label: 'Spruce Leaves', tex: { all: 'spruce_leaves' }, opaque: false, cutout: true, leaves: true, hard: 0.2, sound: 'grass', opacity: 1, flammable: true,
   drops: rng => rng.chance(0.05) ? [{ id: 'sapling', n: 1 }] : [] });
-defBlock(B.BIRCH_LOG, { name: 'birch_log', label: 'Birch Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'birch_log' }, pillar: true, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
+defBlock(B.BIRCH_LOG, { name: 'birch_log', label: 'Birch Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'birch_log' }, pillar: true, log: true, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
 defBlock(B.BIRCH_LEAVES, { name: 'birch_leaves', label: 'Birch Leaves', tex: { all: 'birch_leaves' }, opaque: false, cutout: true, leaves: true, hard: 0.2, sound: 'grass', opacity: 1, flammable: true,
   drops: rng => rng.chance(0.05) ? [{ id: 'sapling', n: 1 }] : [] });
 defBlock(B.TALL_GRASS, { name: 'tall_grass', label: 'Grass', tex: { all: 'tall_grass' }, model: 'cross', solid: false, hard: 0, sound: 'grass', cutout: true, tint: 'grass', replaceable: true,
@@ -564,7 +573,10 @@ defBlock(B.TALL_GRASS, { name: 'tall_grass', label: 'Grass', tex: { all: 'tall_g
 // door: data bit0 = upper half, bits1-2 = facing, bit3 = open, bit4 = hinge on the right
 // (right-hinged doors swing the other way, so a pair side by side opens like vanilla double doors)
 defBlock(B.DOOR, { name: 'door', label: 'Wooden Door', tex: { all: 'door_lower' }, model: 'door', opaque: false, hard: 3, tool: 'axe', sound: 'wood', drops: drop1('door') });
-defBlock(B.BED, { name: 'bed', label: 'Red Bed', tex: { all: 'bed' }, model: 'bed', opaque: false, hard: 0.2, sound: 'wood', drops: (rng, tier, tool, data) => [{ id: bedItemFor(bedColor(data)), n: 1 }] });
+// Same story as the crops: there is no plain 'bed' tile, the set is per colour and per half.
+defBlock(B.BED, { name: 'bed', label: 'Red Bed', tex: { all: 'bed_side_red' }, model: 'bed', opaque: false, hard: 0.2, sound: 'wood',
+  texData: (data, face) => face === 4 ? ((data & 8) ? 'bed_top_head_' : 'bed_top_foot_') + bedColor(data) : 'bed_side_' + bedColor(data),
+  drops: (rng, tier, tool, data) => [{ id: bedItemFor(bedColor(data)), n: 1 }] });
 defBlock(B.STONE_BRICKS, { name: 'stone_bricks', label: 'Stone Bricks', tex: { all: 'stone_bricks' }, hard: 1.5, tool: 'pickaxe', tier: 0 });
 defBlock(B.STONE_BRICKS_MOSSY, { name: 'stone_bricks_mossy', label: 'Mossy Stone Bricks', tex: { all: 'stone_bricks_mossy' }, hard: 1.5, tool: 'pickaxe', tier: 0 });
 defBlock(B.STONE_BRICKS_CRACKED, { name: 'stone_bricks_cracked', label: 'Cracked Stone Bricks', tex: { all: 'stone_bricks_cracked' }, hard: 1.5, tool: 'pickaxe', tier: 0 });
@@ -988,6 +1000,9 @@ for (const bc of BED_COLORS) {
   if (id !== 'bed') {
     defItem(id, { label: WOOL_LABEL[bc] + ' Bed', block: B.BED, blockData: BED_COLOR_IDX[bc] << 4, stack: 1, icon: null });
   }
+  // model 'bed' is in FLAT_MODELS, so the held/dropped bed is a sprite and needs a real tile —
+  // the auto fallback is Blocks[B.BED].tex.all, which is red no matter which bed you're holding
+  Items[id].icon = 'i_bed_' + bc;
   recipe(id, 1, ['WWW', 'PPP'], { W: wool, P: ANY_PLANK });
 }
 recipe('door', 3, ['PP', 'PP', 'PP'], { P: ANY_PLANK });
@@ -1988,31 +2003,87 @@ function buildBlockTextures() {
   });
   // beds: one tile set per colour (see BED_COLORS). The blanket takes the wool colour, the
   // pillow stays white and the frame stays oak — same as vanilla's coloured beds.
+  // **Row 0 of both top tiles is the HEAD end.** Unturned that lands on -z; `emitBed` spins
+  // the UVs by the bed's facing, which is why the oak rail is drawn per-edge here instead of
+  // just down x=0/15 — a bed laid east-west has to keep its rail on the long sides.
+  const BED_WOOD = [143, 108, 62], BED_WOOD_D = [104, 78, 42], BED_WOOD_L = [168, 132, 82];
   for (const bc of BED_COLORS) {
-    const cloth = WOOL_RGB[bc], clothD = shade(cloth, 0.82), clothE = shade(cloth, 0.9);
+    // WOOL_RGB is read here and nowhere else in the bed tiles, so a new colour can't come
+    // out red by leaking a hard-coded tile name (the mistake the dyed wool tiles once made).
+    const cloth = WOOL_RGB[bc], clothD = shade(cloth, 0.78), clothL = mixc(cloth, [255, 255, 255], 0.2);
+    const oak = r => mixc(BED_WOOD, BED_WOOD_D, r.next() * 0.5);
     T.reg('bed_top_head_' + bc, (s, r) => {
       for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
         let c;
-        if (y < 3) c = [146, 110, 63];
-        else if (y < 9) c = mixc([230, 230, 230], [205, 205, 205], r.next() * 0.5); // pillow
-        else c = mixc(cloth, clothD, r.next() * 0.4);
-        if (x === 0 || x === 15) c = [104, 78, 42];
+        if (y === 0 || x === 0 || x === 15) c = oak(r);       // headboard rail + the two long rails
+        else if (y === 1) c = BED_WOOD_D;                     // the shadow the rail throws inwards
+        else if (y <= 8) {                                    // pillow
+          c = mixc([240, 240, 240], [208, 208, 208], r.next() * 0.5);
+          if (x <= 1 || x >= 14) c = mixc(c, [184, 184, 184], 0.55); // tucked under the rail
+          if (y === 8) c = mixc(c, [170, 170, 170], 0.7);            // shaded where the blanket meets it
+        } else {
+          c = mixc(cloth, clothD, r.next() * 0.4);
+          if (y === 9) c = clothL;                            // the folded-over top hem
+        }
         s(x, y, c);
       }
     });
     T.reg('bed_top_foot_' + bc, (s, r) => {
       for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-        let c = mixc(cloth, clothD, r.next() * 0.4);
-        if (y > 12) c = clothE;
-        if (x === 0 || x === 15) c = [104, 78, 42];
+        let c;
+        if (y === 15 || x === 0 || x === 15) c = oak(r);      // foot rail + the two long rails
+        else {
+          c = mixc(cloth, clothD, r.next() * 0.4);
+          if (y === 14) c = clothD;                           // shadow down into the foot rail
+          if (y === 4) c = clothL;                            // a crease across the blanket
+          if (y === 5) c = shade(cloth, 0.88);
+        }
         s(x, y, c);
       }
     });
+    // The long sides. A bed is 9px tall, so emitBed only ever samples rows 7-15 — the rows
+    // above stay clear and are never looked at.
     T.reg('bed_side_' + bc, (s, r) => {
       for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-        if (y < 7) s(x, y, [0, 0, 0, 0]);
-        else if (y < 10) s(x, y, mixc(cloth, clothD, r.next() * 0.4));
-        else s(x, y, mixc([146, 110, 63], [122, 92, 52], r.next() * 0.4));
+        if (y < 7) { s(x, y, [0, 0, 0, 0]); continue; }
+        let c;
+        if (y <= 9) c = y === 9 ? shade(cloth, 0.68) : mixc(cloth, clothD, r.next() * 0.4);
+        else if (y <= 12) c = oak(r);
+        else c = (x < 3 || x > 12) ? oak(r) : BED_WOOD_D;     // legs stand proud, the span between is in shadow
+        s(x, y, c);
+      }
+    });
+  }
+  // The headboard end is bare oak in vanilla — no blanket reaches it — so it needs no colour
+  // set of its own, which is one less place a colour can be got wrong.
+  T.reg('bed_end_head', (s, r) => {
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      if (y < 7) { s(x, y, [0, 0, 0, 0]); continue; }
+      let c = mixc(BED_WOOD, BED_WOOD_D, r.next() * 0.5);
+      if (y === 7) c = BED_WOOD_L;                            // lit top edge of the board
+      if (y >= 13) c = (x < 3 || x > 12) ? c : BED_WOOD_D;
+      s(x, y, c);
+    }
+  });
+  // The item sprite: a little iso bed, so one in your hand / on the ground / in the hotbar
+  // isn't a cube of blanket. Sides are laid down first and the top painted over them.
+  for (const bc of BED_COLORS) {
+    const cloth = WOOL_RGB[bc], clothD = shade(cloth, 0.78);
+    T.reg('i_bed_' + bc, (s, r) => {
+      const A = 3.9, V = 2.4, ox = 7.6, oy = 2.6, LEG = 3;
+      const px = (u, v) => [Math.round(ox + (u - v - 0.5) * A), Math.round(oy + (u + v) * V)];
+      const band = ([sx, sy]) => {
+        for (let k = 1; k <= LEG; k++)
+          s(sx, sy + k, k === 1 ? mixc(cloth, clothD, r.next() * 0.5) : mixc(BED_WOOD, BED_WOOD_D, r.next() * 0.5));
+        s(sx, sy + LEG + 1, BED_WOOD_D);
+      };
+      for (let u = 0; u <= 2.001; u += 0.02) band(px(u, 1));  // the long side facing us
+      for (let v = 0; v <= 1.001; v += 0.02) band(px(2, v));  // the foot end
+      for (let u = 0; u <= 2.001; u += 0.02) for (let v = 0; v <= 1.001; v += 0.02) {
+        const rail = u < 0.06 || u > 1.94 || v < 0.06 || v > 0.94;
+        s(...px(u, v), rail ? mixc(BED_WOOD, BED_WOOD_D, r.next() * 0.5)
+          : u < 0.6 ? mixc([240, 240, 240], [206, 206, 206], r.next() * 0.5)   // pillow at the head end
+          : mixc(cloth, clothD, r.next() * 0.4));
       }
     });
   }
@@ -3057,7 +3128,7 @@ function buildIcons() {
     if (bd.model === 'cross' || bd.model === 'crop' || bd.model === 'torch' || bd.model === 'ladder' || bd.model === 'rail' || bd.model === 'pane') {
       icon = bd.tint === 'grass' ? tintCopy(bd.tex.all, GRASS_ICON_TINT) : tileCanvas(bd.tex.all);
     } else if (bd.id === B.DOOR) icon = doorIcon();
-    else if (bd.id === B.BED) icon = bedIcon('red');
+    else if (bd.id === B.BED) icon = tileCanvas('i_bed_red');
     else if (bd.model === 'trapdoor') icon = trapdoorIcon();
     else if (bd.model === 'sign' || bd.model === 'wall_sign') icon = signIcon();
     else if (bd.model === 'iframe') icon = frameIcon();
@@ -3082,7 +3153,7 @@ function buildIcons() {
     T.icons['wool_' + col.name] = isoIcon('wool_' + col.name, 'wool_' + col.name, 'wool_' + col.name);
   }
   // same for the non-red beds — all one block id carrying a colour nibble
-  for (const bc of BED_COLORS) if (bc !== 'red') T.icons[bedItemFor(bc)] = bedIcon(bc);
+  for (const bc of BED_COLORS) if (bc !== 'red') T.icons[bedItemFor(bc)] = tileCanvas('i_bed_' + bc);
   // sign item: the board seen flat-on with its post below, like vanilla's icon
   function signIcon() {
     const cv = document.createElement('canvas'); cv.width = cv.height = 16;
@@ -3120,17 +3191,6 @@ function buildIcons() {
     c.imageSmoothingEnabled = false;
     c.drawImage(upper, 0, 0, 16, 16, 3, 0, 10, 8);
     c.drawImage(lower, 0, 0, 16, 16, 3, 8, 10, 8);
-    return cv;
-  }
-  function bedIcon(bc) {
-    const cv = document.createElement('canvas'); cv.width = cv.height = 16;
-    const c = cv.getContext('2d');
-    c.imageSmoothingEnabled = false;
-    const head = tileCanvas('bed_top_head_' + bc), foot = tileCanvas('bed_top_foot_' + bc);
-    c.save(); c.setTransform(0.44, 0.18, -0.44, 0.18, 8, 3); c.drawImage(foot, 0, 0); c.restore();
-    c.save(); c.setTransform(0.44, 0.18, -0.44, 0.18, 11.5, 4.8); c.drawImage(head, 0, 0); c.restore();
-    c.fillStyle = '#6b4e2a';
-    c.fillRect(2, 9, 2, 3); c.fillRect(12, 12, 2, 3);
     return cv;
   }
   // item icons from atlas tiles
@@ -3624,6 +3684,48 @@ const Gen = {
     if (biome === BIOMES.taiga || biome === BIOMES.tundra) return 'spruce';
     return null;
   },
+  // Which way a piece's door faces, so a house can be turned to open onto the road.
+  // Directions run 0 = -z, 1 = +x, 2 = +z, 3 = -x, and stamp()'s quarter turns add
+  // to that (rot 1 sends -z to +x). Doorless pieces — well, lamp — come back 0,
+  // which is fine: they're square.
+  structureFront(name) {
+    const t = VILLAGE_STRUCTURES[name];
+    if (!t) return 0;
+    if (t.front !== undefined) return t.front;
+    const b = t.blocks;
+    // the lowest door in the piece, and the level you'd be standing on to use it
+    let dy = null, dx0 = 0, dz0 = 0;
+    for (let i = 0; i < b.length; i += 5)
+      if (b[i + 3] === B.DOOR && (dy === null || b[i + 1] < dy)) { dy = b[i + 1]; dx0 = b[i]; dz0 = b[i + 2]; }
+    if (dy === null) return (t.front = 0);
+    // Which side is "out" isn't just the nearest wall — a smithy's door opens into a
+    // walled yard and the way out is around a corner. So walk it: flood the level the
+    // door stands on and see which edge of the footprint you fall off first.
+    const wall = new Set();
+    for (let i = 0; i < b.length; i += 5) {
+      if (b[i + 1] !== dy || b[i + 3] === B.DOOR) continue;
+      const d = Blocks[b[i + 3]];
+      if (d && d.opaque) wall.add(b[i] + ',' + b[i + 2]);
+    }
+    const seen = new Set([dx0 + ',' + dz0]);
+    let q = [[dx0, dz0]];
+    while (q.length) {
+      const next = [];
+      for (const [x, z] of q) {
+        for (const [nx, nz, dir] of [[x, z - 1, 0], [x + 1, z, 1], [x, z + 1, 2], [x - 1, z, 3]]) {
+          if (nx < 0 || nz < 0 || nx >= t.w || nz >= t.d) return (t.front = dir);
+          const k = nx + ',' + nz;
+          if (seen.has(k) || wall.has(k)) continue;
+          seen.add(k); next.push([nx, nz]);
+        }
+      }
+      q = next;
+    }
+    return (t.front = 0); // sealed somehow — leave it as built
+  },
+  // Vanilla-shaped layout: a gravel plaza around the well, 3-wide roads leaving it
+  // along the cardinal axes only — so every bend is a hard 90°, never a diagonal
+  // stair — and buildings parked along the kerb with their doors turned to the road.
   buildVillage(cx, cz, style, biome, r) {
     const blocks = new Map(); // "x,y,z" → [id, data]
     const be = [], entities = [], plots = [];
@@ -3635,49 +3737,128 @@ const Gen = {
     const SURFACE = desert ? B.SAND : (biome.snowy ? B.GRASS_SNOW : B.GRASS);
     const FILL = desert ? B.SANDSTONE : B.DIRT;
     const groundAt = (x, z) => this.heightAt(x, z);
-    // Trees are placed before structures, so a spruce village drops into standing
-    // taiga forest. stamp() clears each building's own plot; this opens the square
-    // in the middle so the well isn't inside a trunk.
     const wy = groundAt(cx, cz);
-    for (let dx = -7; dx <= 7; dx++) for (let dz = -7; dz <= 7; dz++) {
-      if (dx * dx + dz * dz > 49) continue;
-      const cy = groundAt(cx + dx, cz + dz);
-      for (let y = cy + 1; y <= cy + 7; y++) put(cx + dx, y, cz + dz, B.AIR);
-    }
-    // well
-    plots.push([cx - 8, cz - 8, cx + 8, cz + 8]); // the square, so no tree grows back into it
-    this.stamp(put, be, plots, set.well, cx, cz, wy, r, SURFACE, FILL);
-    // buildings around
-    const spots = [];
-    const nB = 5 + r.nextInt(4);
-    for (let i = 0; i < nB; i++) {
-      const ang = (i / nB) * Math.PI * 2 + r.next() * 0.5;
-      const dist = 14 + r.nextInt(18);
-      spots.push([Math.round(cx + Math.cos(ang) * dist), Math.round(cz + Math.sin(ang) * dist)]);
-    }
-    let didSmith = false, didFarm = false;
-    spots.forEach(([hx, hz], i) => {
-      const gy = groundAt(hx, hz);
-      if (gy <= SEA || Math.abs(gy - wy) > 9) return;
-      // each piece gets its own quarter turn, or every house in the village faces the same way
-      const rot = r.nextInt(4);
-      if (!didFarm && i >= 1) { didFarm = true; plots.push([hx - 4, hz - 5, hx + 4, hz + 5]); this.buildFarm(put, be, hx, hz, gy, r); }
-      else if (!didSmith && i >= 2) { didSmith = true; this.stamp(put, be, plots, set.smith, hx, hz, gy, r, SURFACE, FILL, rot); }
-      else this.stamp(put, be, plots, set.house, hx, hz, gy, r, SURFACE, FILL, rot);
-      // gravel path from well
-      const steps = Math.max(Math.abs(hx - cx), Math.abs(hz - cz));
-      for (let s2 = 3; s2 < steps - 3; s2++) {
-        const px = Math.round(lerp(cx, hx, s2 / steps)), pz = Math.round(lerp(cz, hz, s2 / steps));
-        const py = groundAt(px, pz);
-        if (py > SEA) { put(px, py, pz, B.GRAVEL); for (let y = py + 1; y <= py + 5; y++) put(px, y, pz, B.AIR); }
+
+    const CARD = [[0, -1], [1, 0], [0, 1], [-1, 0]]; // indexed like structureFront
+    const PLAZA = 5;  // the gravel square around the well is (2*PLAZA+1)², so the 6-wide desert well still gets a kerb
+    const KERB = 2;   // a road covers its centre line ±1, so 2 is the first free block
+
+    // One road block. Follows the terrain instead of levelling it, and clears the
+    // headroom above — trees are placed before villages, so something is usually there.
+    const pave = (x, z) => {
+      const y = groundAt(x, z);
+      if (y <= SEA) return;
+      put(x, y - 1, z, FILL); // gravel falls, and a road can cross a shallow dip
+      put(x, y, z, B.GRAVEL);
+      for (let k = y + 1; k <= y + 6; k++) put(x, k, z, B.AIR);
+    };
+    // Buildings avoid each other with a block to spare (pad 1); they're meant to sit
+    // flush against the road, so roads block with pad 0.
+    const blocked = [];
+    const clash = (a) => blocked.some(b =>
+      a[0] <= b[2] + b[4] && a[2] >= b[0] - b[4] && a[1] <= b[3] + b[4] && a[3] >= b[1] - b[4]);
+    // near edge KERB away from the centre line, on the side `sgn` points
+    const off = (a, L, sgn) => sgn > 0 ? a + KERB + (L >> 1) : a - KERB - L + 1 + (L >> 1);
+
+    // ---- plaza
+    for (let dx = -PLAZA; dx <= PLAZA; dx++) for (let dz = -PLAZA; dz <= PLAZA; dz++) pave(cx + dx, cz + dz);
+    const plaza = [cx - PLAZA, cz - PLAZA, cx + PLAZA, cz + PLAZA];
+    plots.push(plaza); blocked.push([...plaza, 0]);
+
+    // ---- roads: two or three mains out of the plaza, each with at most one branch
+    const segs = [], mains = [];
+    const addSeg = (x, z, dir, len) => {
+      const [ux, uz] = CARD[dir], px = -uz, pz = ux;
+      for (let i = 0; i <= len; i++) for (let o = -1; o <= 1; o++) pave(x + ux * i + px * o, z + uz * i + pz * o);
+      const ex = x + ux * len, ez = z + uz * len;
+      const rect = [Math.min(x, ex) - Math.abs(px), Math.min(z, ez) - Math.abs(pz),
+                    Math.max(x, ex) + Math.abs(px), Math.max(z, ez) + Math.abs(pz)];
+      plots.push(rect); blocked.push([...rect, 0]);
+      const s = { x, z, dir, len, ux, uz, px, pz };
+      segs.push(s);
+      return s;
+    };
+    const order = [0, 1, 2, 3];
+    for (let i = 3; i > 0; i--) { const j = r.nextInt(i + 1); const t = order[i]; order[i] = order[j]; order[j] = t; }
+    const nMain = 2 + r.nextInt(2);
+    for (let i = 0; i < nMain; i++) {
+      const dir = order[i], [ux, uz] = CARD[dir];
+      const len = 15 + r.nextInt(12);
+      mains.push(addSeg(cx + ux * PLAZA, cz + uz * PLAZA, dir, len));
+      // one side street, taken off the middle of the main road as a clean T junction:
+      // it starts on the main's own centre line so the corner paves solid
+      if (len >= 18 && r.chance(0.55)) {
+        const at = PLAZA + 8 + r.nextInt(len - 14);
+        addSeg(cx + ux * at, cz + uz * at, (dir + (r.chance(0.5) ? 1 : 3)) & 3, 10 + r.nextInt(8));
       }
-    });
-    // lamp posts
-    for (const [lx, lz] of [[cx + 5, cz + 5], [cx - 5, cz - 5]]) {
-      const ly = groundAt(lx, lz);
-      if (ly > SEA) this.stamp(put, be, plots, set.lamp, lx, lz, ly, r, SURFACE, FILL);
     }
-    for (let i = 0; i < 4; i++) entities.push({ type: 'villager', x: cx + r.nextInt(7) - 3 + 0.5, y: wy + 2, z: cz + r.nextInt(7) - 3 + 0.5 });
+
+    // ---- kerbside slots, walked along each road and offered on both sides.
+    // Shuffled and then only partly used, so the village scatters over the whole
+    // network instead of filling up solid from the plaza outwards.
+    const slots = [];
+    for (const s of segs) for (let t = 4; t <= s.len - 2; t += 9)
+      for (const side of [1, -1]) slots.push({ s, t: t + r.nextInt(2), side });
+    for (let i = slots.length - 1; i > 0; i--) { const j = r.nextInt(i + 1); const t = slots[i]; slots[i] = slots[j]; slots[j] = t; }
+    // One smith and one farm, both early in the row: a slot can be refused for
+    // clashing or for standing on a slope, and a smith queued last often never lands.
+    const nB = 5 + r.nextInt(4);
+    const kinds = [];
+    while (kinds.length < nB) kinds.push('house');
+    kinds[r.nextInt(2)] = 'smith';
+    let f = r.nextInt(3);
+    if (kinds[f] === 'smith') f = (f + 1) % 3;
+    kinds[f] = 'farm';
+
+    let placed = 0;
+    for (const slot of slots) {
+      if (placed >= nB) break;
+      const { s, t, side } = slot;
+      const kind = kinds[placed];
+      const name = kind === 'smith' ? set.smith : set.house;
+      // the road lies opposite the side the piece stands on, so that's where the door goes
+      const want = (s.dir + (side > 0 ? 3 : 1)) & 3;
+      let w, d, rot = 0;
+      if (kind === 'farm') { w = 7; d = 9; }
+      else {
+        const tp = VILLAGE_STRUCTURES[name];
+        if (!tp) continue;
+        rot = (want - this.structureFront(name)) & 3;
+        // an odd number of quarter turns swaps the footprint's width and depth
+        w = (rot & 1) ? tp.d : tp.w; d = (rot & 1) ? tp.w : tp.d;
+      }
+      const ax = s.x + s.ux * t, az = s.z + s.uz * t;
+      // where the road meets the sea pave() gives up, so don't hang a door off that stretch
+      if (groundAt(ax, az) <= SEA) continue;
+      let hx, hz;
+      if (s.pz) { hx = ax; hz = off(az, d, s.pz * side); }
+      else { hz = az; hx = off(ax, w, s.px * side); }
+      const rect = [hx - (w >> 1), hz - (d >> 1), hx - (w >> 1) + w - 1, hz - (d >> 1) + d - 1];
+      const gy = groundAt(hx, hz);
+      if (gy <= SEA || Math.abs(gy - wy) > 9 || clash(rect)) continue;
+      blocked.push([...rect, 1]);
+      if (kind === 'farm') { plots.push(rect); this.buildFarm(put, be, hx, hz, gy, r); }
+      else this.stamp(put, be, plots, name, hx, hz, gy, r, SURFACE, FILL, rot);
+      placed++;
+    }
+
+    // ---- lamp posts: one in the corner of the plaza, one at the far end of each main
+    const lamps = [[cx - PLAZA - 2, cz - PLAZA - 2]];
+    for (const s of mains) {
+      const side = r.chance(0.5) ? 1 : -1;
+      const ax = s.x + s.ux * (s.len - 1), az = s.z + s.uz * (s.len - 1);
+      lamps.push(s.pz ? [ax, off(az, 3, s.pz * side)] : [off(ax, 3, s.px * side), az]);
+    }
+    for (const [lx, lz] of lamps) {
+      const ly = groundAt(lx, lz), rect = [lx - 1, lz - 1, lx + 1, lz + 1];
+      if (ly <= SEA || clash(rect)) continue;
+      blocked.push([...rect, 1]);
+      this.stamp(put, be, plots, set.lamp, lx, lz, ly, r, SURFACE, FILL);
+    }
+
+    // the well goes on last, so the plaza gravel doesn't pave over it
+    this.stamp(put, be, plots, set.well, cx, cz, wy, r, SURFACE, FILL);
+    for (let i = 0; i < 4; i++) entities.push({ type: 'villager', x: cx + r.nextInt(9) - 4 + 0.5, y: wy + 2, z: cz + r.nextInt(9) - 4 + 0.5 });
     return { blocks, be, entities, plots, x0: cx - 60, z0: cz - 60, x1: cx + 60, z1: cz + 60, cx, cz };
   },
   // Drops one hand-built piece from structures.js onto (hx, hz). The plot gets
@@ -3716,12 +3897,14 @@ const Gen = {
   },
   buildFarm(put, be, hx, hz, gy, r) {
     for (let dx = -3; dx <= 3; dx++) for (let dz = -4; dz <= 4; dz++) {
+      // level the plot the way stamp() does, or on a slope the log border floats
+      for (let q = gy - 3; q <= gy; q++) put(hx + dx, q, hz + dz, B.DIRT);
+      for (let q = gy + 3; q <= gy + 6; q++) put(hx + dx, q, hz + dz, B.AIR);
       const border = Math.abs(dx) === 3 || Math.abs(dz) === 4;
       if (border) { put(hx + dx, gy + 1, hz + dz, B.LOG); continue; }
       if (dx === 0) { put(hx + dx, gy + 1, hz + dz, B.WATER); continue; }
       put(hx + dx, gy + 1, hz + dz, B.FARMLAND, 7);
       put(hx + dx, gy + 2, hz + dz, B.WHEAT_CROP, 4 + r.nextInt(4));
-      for (let q = gy - 2; q <= gy; q++) put(hx + dx, q, hz + dz, B.DIRT);
     }
   },
   applyVillages(chunk) {
@@ -4215,9 +4398,18 @@ class World {
     if (lx === 0) this.dirtyNeighbor(x - 1, z); if (lx === 15) this.dirtyNeighbor(x + 1, z);
     if (lz === 0) this.dirtyNeighbor(x, z - 1); if (lz === 15) this.dirtyNeighbor(x, z + 1);
     if (!opts.noUpdate) {
+      // felling a log strands the canopy above it — poke every leaf in range to re-check now
+      // rather than waiting for a random tick to wander onto it (that took ~30 game minutes)
+      if (Blocks[oldId] && Blocks[oldId].log && !(newDef && newDef.log)) this.scheduleLeafDecay(x, y, z);
       this.scheduleFluidAround(x, y, z);
-      this.notifyNeighbors(x, y, z);
-      this.checkSupport(x, y, z);
+      // `noPhysics` is for edits that arrive from the other player: they already ran this
+      // cascade on their side and sent us whatever it knocked loose, so running it again here
+      // drops a second copy of everything it touches (see Game.onRemoteBlocks). Fluids and
+      // redstone still run — those settle to the same answer instead of spawning items.
+      if (!opts.noPhysics) {
+        this.notifyNeighbors(x, y, z);
+        this.checkSupport(x, y, z);
+      }
       this.onRedstoneChange(x, y, z, oldId, id);
     }
     return true;
@@ -4266,11 +4458,19 @@ class World {
       return;
     }
     if (id === B.TORCH || id === B.REDSTONE_TORCH || id === B.REDSTONE_TORCH_OFF) {
-      const d = this.getData(x, y, z) & 7;
       // data: 0 floor, 1 attached -x, 2 attached +x, 3 attached -z, 4 attached +z
-      const att = [[0, -1, 0], [-1, 0, 0], [1, 0, 0], [0, 0, -1], [0, 0, 1]][d] || [0, -1, 0];
-      const sup = Blocks[this.getBlock(x + att[0], y + att[1], z + att[2])];
-      if (!sup || !sup.opaque) return this.breakBlock(x, y, z, null, true); // any full opaque block (incl. pistons)
+      const d = this.getData(x, y, z) & 7;
+      if (d === 0) {
+        // A standing torch takes anything you could stand on yourself — a top slab or
+        // upside-down stairs included, like vanilla. placeBlock already allows exactly that
+        // (`blockSolidTop`), and demanding a full opaque block here instead is what popped a
+        // freshly placed torch straight back off a slab — and duplicated it over the wire.
+        if (!blockSolidTop(this.getBlock(x, y - 1, z), this.getData(x, y - 1, z))) return this.breakBlock(x, y, z, null, true);
+      } else {
+        const att = [null, [-1, 0, 0], [1, 0, 0], [0, 0, -1], [0, 0, 1]][d] || [0, -1, 0];
+        const sup = Blocks[this.getBlock(x + att[0], y + att[1], z + att[2])];
+        if (!sup || !sup.opaque) return this.breakBlock(x, y, z, null, true); // a wall torch still needs a full side
+      }
     }
     if (id === B.DOOR) {
       const d = this.getData(x, y, z);
@@ -5286,6 +5486,11 @@ class World {
         else if (id === B.STONE_BUTTON) this.tickButton(v.x, v.y, v.z);
         else if (id === B.REPEATER) this.tickRepeater(v.x, v.y, v.z);
         else if (id === B.REDSTONE_TORCH || id === B.REDSTONE_TORCH_OFF) this.tickRedstoneTorch(v.x, v.y, v.z);
+        else if (Blocks[id] && Blocks[id].leaves) {
+          const c2 = this.getChunk(v.x >> 4, v.z >> 4);
+          const persistent = c2 && (c2.data[chIdx(v.x & 15, v.z & 15, v.y)] & LEAF_PERSISTENT);
+          if (!persistent && !this.leafHasLog(v.x, v.y, v.z)) this.decayLeaf(v.x, v.y, v.z);
+        }
       }
     }
     // pressure plates: pressed while a player/mob stands on them
@@ -5329,8 +5534,86 @@ class World {
         } else if (id === B.GRASS) {
           const wx = c.cx * 16 + lx, wz = c.cz * 16 + lz;
           if (y < 127 && this.opacity(this.getBlock(wx, y + 1, wz)) >= 15) this.setBlock(wx, y, wz, B.DIRT);
+        } else if (Blocks[id] && Blocks[id].leaves && !(c.data[idx] & LEAF_PERSISTENT)) {
+          // cut the trunk out from under a canopy and it comes down by itself, a random tick
+          // at a time, dropping the usual sapling/apple roll on the way
+          const wx = c.cx * 16 + lx, wz = c.cz * 16 + lz;
+          if (!this.leafHasLog(wx, y, wz)) this.decayLeaf(wx, y, wz);
         }
       }
+    }
+  }
+  // A log just went away, so every leaf that could have been leaning on it gets a decay check
+  // queued. The delay is spread by distance so the canopy crumbles outwards over a few seconds
+  // instead of vanishing in one frame — and each leaf that does go schedules its own neighbours,
+  // so the collapse walks up a tree taller than this radius.
+  scheduleLeafDecay(x, y, z) {
+    const R = 5;
+    for (let dx = -R; dx <= R; dx++) for (let dy = -R; dy <= R; dy++) for (let dz = -R; dz <= R; dz++) {
+      const d = Blocks[this.getBlock(x + dx, y + dy, z + dz)];
+      if (!d || !d.leaves) continue;
+      const dist = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+      this.scheduleTick(x + dx, y + dy, z + dz, 24 + dist * 15 + ((Math.random() * 24) | 0));
+    }
+  }
+  // A leaf lives while ANY log of its tree is still standing — flood out through the connected
+  // leaves and see if the search ever touches wood.
+  //
+  // Vanilla caps that search at 4 steps, and that cap is what made single leaves pop off a tree
+  // you had only *started* chopping: take the bottom log of a spruce and the leaves down at that
+  // height are suddenly further than 4 from the wood that is left. Patrik wanted the canopy to
+  // stay whole until the last log is gone, so the limit is now generous enough to reach the
+  // trunk from anywhere in a canopy rather than being the rule itself.
+  //
+  // Both bounds below fail SAFE, i.e. they keep the leaf:
+  //  - hitting an unloaded chunk means we can't prove there's no log out there. Without this a
+  //    leaf near the edge of the loaded area would quietly vanish, because getBlock reads
+  //    unloaded as air.
+  //  - the node cap stops a run of canopies that grew into each other from turning one leaf
+  //    check into a walk across the forest.
+  leafHasLog(x, y, z) {
+    const MAX_STEPS = 8, MAX_NODES = 320;
+    const seen = new Set([x + ',' + y + ',' + z]);
+    let front = [[x, y, z]];
+    for (let step = 0; step < MAX_STEPS && front.length; step++) {
+      const next = [];
+      for (const [cx, cy, cz] of front) {
+        for (const [ox, oy, oz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]) {
+          const nx = cx + ox, ny = cy + oy, nz = cz + oz;
+          if (ny < 0 || ny > 127) continue;
+          const k = nx + ',' + ny + ',' + nz;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          if (!this.isLoaded(nx, nz)) return true;
+          const d = Blocks[this.getBlock(nx, ny, nz)];
+          if (!d) continue;
+          if (d.log) return true;
+          if (d.leaves) next.push([nx, ny, nz]);
+        }
+      }
+      if (seen.size > MAX_NODES) return true;
+      front = next;
+    }
+    return false;
+  }
+  decayLeaf(x, y, z) {
+    const mpOn = typeof Game !== 'undefined' && typeof Net !== 'undefined' && Net.connected;
+    // Host-only, the same rule furnace smelting follows. A guest owns no drops — its
+    // spawnItemEntity forwards the request to the host — so if both sides decayed the same leaf
+    // the host would be asked for the sapling twice. The host's removals go out over the wire
+    // below, and that is what brings the guest's canopy down.
+    if (mpOn && Game.isGuest) return;
+    if (typeof Particles !== 'undefined') Particles.blockBreak(this, x, y, z, this.getBlock(x, y, z));
+    // this runs from a tick, never inside a player action, so no capture is open to clobber
+    const capture = mpOn && Game.mpRole && Game.mpCapturing == null;
+    if (capture) Game.mpBeginEdit();
+    this.breakBlock(x, y, z, null, true); // dropAlways, so the sapling/apple roll still runs
+    if (capture) Game.mpEndEdit();
+    // this leaf was propping up its neighbours, so they get re-checked too — that is what
+    // carries the collapse past the radius of the original scheduleLeafDecay
+    for (const [ox, oy, oz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]) {
+      const d = Blocks[this.getBlock(x + ox, y + oy, z + oz)];
+      if (d && d.leaves) this.scheduleTick(x + ox, y + oy, z + oz, 16 + ((Math.random() * 20) | 0));
     }
   }
   tickFurnace(be) {
@@ -5610,6 +5893,10 @@ const Mesher = {
 
   texFor(def, face, data) {
     const t = def.tex;
+    // blocks whose tile is picked by their data (crop stage, bed colour + half). Their own
+    // emit* already know this; texFor is what break particles and the held/dropped mini block
+    // go through, and those used to land on `missing` — the magenta confetti.
+    if (def.texData) return def.texData(data, face);
     // dyed wool: data bits0-3 pick the tile (white keeps the plain 'wool' name)
     if (def.colored) { const c = WOOL_COLORS[data & 15]; return (c && c.name !== 'white') ? 'wool_' + c.name : t.all; }
     if (t.all) return t.all;
@@ -6216,7 +6503,15 @@ const Mesher = {
     const wall = data !== 0;
     if (wall) { ox = -leanDir[0] * 0.30; oz = -leanDir[1] * 0.30; lean = 0.22; }
     const bx0 = 0.4375, bx1 = 0.5625;
-    const h = 0.625;
+    // Both torch tiles (see textures.js) draw the stick on rows 8-15 and the head on rows 5-7,
+    // with 0-4 clear. The sides used to sample all 16 rows into a 10/16 box, so the clear rows ate
+    // the top third of it: the head was painted well down the stick while the top cap — which
+    // samples the head rows directly — sat at the box top with a gap under it.
+    // Keeping the old squash on purpose (Patrik wants the small stubby torch, not a 1:1 one);
+    // the box just stops where the tile stops being transparent, which brings the cap down onto
+    // the flame without changing how the stick reads.
+    const TOP_ROW = 5;
+    const h = 0.625 * (16 - TOP_ROW) / 16;
     const yb = wall ? 0.2 : 0;
     // vertices with shear
     const shear = (px, py, pz) => [
@@ -6225,7 +6520,7 @@ const Mesher = {
       pz + oz + leanDir[1] * lean * ((py - y - yb) / h),
     ];
     const tex = def.tex.all || 'torch'; // use def's texture, not hardcoded 'torch'
-    const uvSide = [[7 / 16, 1], [9 / 16, 1], [9 / 16, 0], [7 / 16, 0]];
+    const uvSide = [[7 / 16, 1], [9 / 16, 1], [9 / 16, TOP_ROW / 16], [7 / 16, TOP_ROW / 16]];
     for (let f = 0; f < 4; f++) {
       const P = FACE_V[f].map(cv => shear(
         x + (cv[0] === 1 ? bx1 : bx0),
@@ -6233,8 +6528,8 @@ const Mesher = {
         z + (cv[2] === 1 ? bx1 : bx0)));
       this.litQuad(world, def, P, tex, uvSide, -1, x, y, z);
     }
-    // top face (coal tip)
-    const uvTop = [[7 / 16, 8 / 16], [9 / 16, 8 / 16], [9 / 16, 6 / 16], [7 / 16, 6 / 16]];
+    // top face: the 2×2 patch at the very top of the head, so it sits flush on the sides
+    const uvTop = [[7 / 16, (TOP_ROW + 2) / 16], [9 / 16, (TOP_ROW + 2) / 16], [9 / 16, TOP_ROW / 16], [7 / 16, TOP_ROW / 16]];
     const P = FACE_V[4].map(cv => shear(x + (cv[0] === 1 ? bx1 : bx0), y + yb + h, z + (cv[2] === 1 ? bx1 : bx0)));
     this.litQuad(world, def, P, tex, uvTop, -1, x, y, z);
   },
@@ -6358,16 +6653,27 @@ const Mesher = {
   emitBed(world, def, x, y, z, data) {
     const head = (data & 8) !== 0;
     const c = bedColor(data);   // bits4-7; the blanket tiles come in one set per colour
-    const topTex = (head ? 'bed_top_head_' : 'bed_top_foot_') + c;
+    const facing = (data >> 1) & 3;  // FACE index the head points along — same 0=-z 1=+x 2=+z 3=-x order
     const h = 0.5625;
-    // top
-    const facing = (data >> 1) & 3;
+    // Both top tiles are drawn head-end-first at row 0, which unturned lands on -z. Turning the
+    // UV assignment by `facing` quarter turns is what stops an east-west bed reading sideways —
+    // this used to compute `facing` and then never use it.
+    const topTex = (head ? 'bed_top_head_' : 'bed_top_foot_') + c;
+    const uvTop = FACE_UV[4].map((_, i) => FACE_UV[4][(i + facing) & 3]);
     const P = FACE_V[4].map(cv => [x + cv[0], y + h, z + cv[2]]);
-    this.litQuad(world, def, P, topTex, FACE_UV[4], 4, x, y, z);
+    this.litQuad(world, def, P, topTex, uvTop, 4, x, y, z);
+    // the face the other half sits against — skipped, but only once it's confirmed to be there,
+    // so a half bed left behind by an odd save still looks closed
+    const join = head ? (facing + 2) & 3 : facing;
+    const jn = FACE_N[join];
+    const joined = world.getBlock(x + jn[0], y, z + jn[2]) === B.BED;
     for (let f = 0; f < 4; f++) {
+      if (joined && f === join) continue;
       const Q = FACE_V[f].map(cv => [x + cv[0], y + cv[1] * h, z + cv[2]]);
       const uv = [[0, 1], [1, 1], [1, 1 - h], [0, 1 - h]];
-      this.litQuad(world, def, Q, 'bed_side_' + c, uv, f, x, y, z);
+      // the headboard is bare oak — no blanket reaches it, so that tile carries no colour
+      const tex = (head && f === facing) ? 'bed_end_head' : 'bed_side_' + c;
+      this.litQuad(world, def, Q, tex, uv, f, x, y, z);
     }
   },
   emitFire(world, def, x, y, z) {
@@ -7223,10 +7529,17 @@ const Particles = {
   },
   clear() { this.list.length = 0; },
 
+  // The tile a block's crumbs are cut from. Goes through Mesher.texFor with a side face, so it
+  // picks up everything the data decides — crop stage, bed colour, the dyed wool tile (those used
+  // to shed white crumbs whatever the colour) — instead of a fixed tex.all that may not exist.
+  crumbTex(world, x, y, z, def) {
+    return Mesher.texFor(def, 1, world ? world.getData(x, y, z) : 0);
+  },
+
   blockBreak(world, x, y, z, id) {
     const def = Blocks[id];
     if (!def || !def.tex) return;
-    const texName = def.tex.all || def.tex.side || def.tex.top;
+    const texName = this.crumbTex(world, x, y, z, def);
     const slot = Tex.uv(texName);
     const tint = def.tintTop === 'grass' || def.tint === 'grass' ? [0.57, 0.74, 0.35] : def.tint === 'foliage' ? [0.47, 0.67, 0.18] : [1, 1, 1];
     for (let i = 0; i < 20; i++) {
@@ -7245,7 +7558,7 @@ const Particles = {
   blockHit(world, x, y, z, id, face) {
     const def = Blocks[id];
     if (!def || !def.tex) return;
-    const texName = def.tex.all || def.tex.side || def.tex.top;
+    const texName = this.crumbTex(world, x, y, z, def);
     const n = FACE_N[face] || [0, 1, 0];
     const tint = def.tintTop === 'grass' ? [0.57, 0.74, 0.35] : def.tint === 'foliage' ? [0.47, 0.67, 0.18] : [1, 1, 1];
     this.spawn({
@@ -11175,6 +11488,8 @@ class Player {
     // data value on the item
     if (it.blockData !== undefined) data = it.blockData;
     // support requirements + orientation
+    // leaves you place stay put; only the ones a tree grew are allowed to decay
+    if (bdef.leaves) data |= LEAF_PERSISTENT;
     if (bid === B.FLOWER_POT && !blockSolidTop(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz))) return;
     if (bid === B.TORCH || bid === B.REDSTONE_TORCH) {
       if (hit.face === 5) return;
@@ -14839,7 +15154,11 @@ const Game = {
         }
         this.beLocks.delete(key);
       }
-      this.world.setBlock(e[0], e[1], e[2], e[3], e[4]);
+      // noPhysics: the sender already ran the support cascade and every block it knocked
+      // loose is in this same edit list. Re-running it here made the receiver break those
+      // blocks a second time and spawn a second set of drops — the reason a torch sitting on
+      // a block someone else mined came back as two torches, and only ever for the host.
+      this.world.setBlock(e[0], e[1], e[2], e[3], e[4], { noPhysics: true });
     }
   },
   // ---- container sync (chests + furnaces, host-authoritative) ----
