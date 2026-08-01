@@ -10585,8 +10585,8 @@ function updateEntities(world, dt, game) {
     // unloaded chunks, so it would fall out of the world and delete itself. Matters
     // for mobs restored from a save that sit outside the initial load radius.
     if (!world.isLoaded(floor(e.x), floor(e.z))) continue;
-    // skip far entities
-    const d = Math.hypot(e.x - p.x, e.z - p.z);
+    // skip entities far from EVERY player (not just ours — see Game.mpNearestPlayerDist)
+    const d = game.mpNearestPlayerDist ? game.mpNearestPlayerDist(e.x, e.z) : Math.hypot(e.x - p.x, e.z - p.z);
     if (d > 140) { if (e.type === 'item' || e.type === 'xp') continue; }
     if (d < 130) e.tick(dt, game);
     if (e.dead) world.entities.splice(i, 1);
@@ -14862,6 +14862,12 @@ const MP_ENT_MIN_RADIUS = 32;
 // Entities already being tracked stay in the list until they pass radius * this, so a mob
 // wandering across the boundary can't be created and destroyed on alternate snapshots.
 const MP_ENT_HYSTERESIS = 1.15;
+// How far around each OTHER player the host keeps the world generated and simulated. This is
+// physics, not a view — 2 chunks each way is 80x80 blocks, plenty for breaking blocks, drops
+// and the mobs at your elbow, without the host paying a full render distance per guest
+// (chunks are ~96 KB each and this game never unloads them).
+const MP_GUEST_SIM_CHUNKS = 2;
+const MP_GUEST_CHUNK_BUDGET = 2;   // chunks generated per frame across all guests
 
 const Game = {
   state: 'title', // title|create|loading|play|dead|win
@@ -15591,6 +15597,13 @@ const Game = {
   },
   applyRemoteBlocks(m) {
     for (const e of m.edits) {
+      // The chunk streamer runs on a small per-frame budget, so a guest who has just moved
+      // can send an edit for a chunk we haven't generated yet — and setBlock silently
+      // returns false for those, losing the edit from the authoritative world for good.
+      // We own this world; an edit is never ours to drop, so generate on demand.
+      if (this.mpRole === 'host' && !this.world.isLoaded(e[0], e[2])) {
+        this.world.ensureChunk(e[0] >> 4, e[2] >> 4);
+      }
       // A guest that breaks a chest deliberately does NOT spill it (their copy may be
       // stale — that's how items used to get duplicated). We own the real contents,
       // so we drop them here, once, from our side.
@@ -15837,10 +15850,19 @@ const Game = {
     Net.send('dropReq', { x: +x.toFixed(2), y: +y.toFixed(2), z: +z.toFixed(2),
       id: stack.id, n: stack.n, dur: stack.dur, sc: scatter ? 1 : 0 }, 0);
   },
+  // Anything a guest asks us to create lands at THEIR feet, which may be somewhere we
+  // haven't generated yet — and an entity in an ungenerated chunk is never simulated
+  // (updateEntities skips it), so a requested drop would just hang there uncollectable.
+  mpEnsureAt(x, z) {
+    if (this.mpRole === 'host' && this.world && !this.world.isLoaded(floor(x), floor(z))) {
+      this.world.ensureChunk(floor(x) >> 4, floor(z) >> 4);
+    }
+  },
   // Host: a guest drop request → spawn a real (authoritative) item entity.
   onRemoteDropReq(m) {
     if (this.mpRole !== 'host' || !this.world || !m.id) return;
     const st = { id: m.id, n: m.n || 1 }; if (m.dur != null) st.dur = m.dur;
+    this.mpEnsureAt(m.x, m.z);
     spawnItemEntity(this.world, m.x, m.y, m.z, st, !!m.sc);
   },
   // Host: hand a picked-up stack to the guest who walked over it.
@@ -16080,6 +16102,7 @@ const Game = {
   onRemoteSpawnReq(m) {
     if (this.mpRole !== 'host' || !this.world) return;
     const w = this.world;
+    this.mpEnsureAt(m.x, m.z);
     if (m.k === 'mob') spawnMob(w, m.mt, m.x, m.y, m.z);
     else if (m.k === 'tnt') spawnPrimedTNT(w, m.x, m.y, m.z, m.fuse || 80);
     // the arrow remembers WHICH player fired it so it can't hit its own shooter
@@ -16094,6 +16117,22 @@ const Game = {
         break;
       }
     }
+  },
+  // Distance from (x,z) to the CLOSEST player in this world — us or any remote. Entity
+  // simulation used to measure from the local player alone, so everything around a guest who
+  // had walked away from the host simply stopped: their dropped items were never collected
+  // (pickup-on-behalf-of-a-guest runs inside ItemEntity.update) and the mobs beside them froze.
+  mpNearestPlayerDist(x, z) {
+    const p = this.player;
+    let best = p ? Math.hypot(p.x - x, p.z - z) : Infinity;
+    if (this.mpRole === 'host' && Net.connected) {
+      for (const r of this.remotes.values()) {
+        if (!r.seen) continue;
+        const d = Math.hypot(r.dispX - x, r.dispZ - z);
+        if (d < best) best = d;
+      }
+    }
+    return best;
   },
   // ---- how far this client can actually see entities (guest -> host, for culling) ----
   // Two independent limits: fog swallows everything past the render distance, and
@@ -17062,6 +17101,28 @@ const Game = {
         if (!w.getChunk(pcx + dx, pcz + dz)) {
           w.ensureChunk(pcx + dx, pcz + dz);
           budget--;
+        }
+      }
+    }
+    // The other players need ground under their feet on OUR side too. Their own client
+    // renders their surroundings just fine, but we own the authoritative world: the blocks
+    // they break, the items they drop and the entities beside them all live here, and none
+    // of it works in a chunk we never generated (setBlock returns false, and updateEntities
+    // skips anything standing in an ungenerated chunk). That is exactly "I walk away from
+    // the guest and they can't break anything or pick anything up".
+    // This is a SIMULATION radius, not a view: no meshes are built for these chunks, because
+    // updateChunkMeshes below only ever runs on our own position.
+    if (this.mpRole === 'host' && Net.connected && this.remotes.size) {
+      let rb = MP_GUEST_CHUNK_BUDGET;
+      for (const r of this.remotes.values()) {
+        if (rb <= 0) break;
+        if (!r.seen) continue;   // no position yet — culling/loading a (0,0) guest is meaningless
+        const rcx = floor(r.dispX) >> 4, rcz = floor(r.dispZ) >> 4;
+        for (let d = 0; d <= MP_GUEST_SIM_CHUNKS && rb > 0; d++) {
+          for (let dx = -d; dx <= d && rb > 0; dx++) for (let dz = -d; dz <= d && rb > 0; dz++) {
+            if (Math.max(Math.abs(dx), Math.abs(dz)) !== d) continue;
+            if (!w.getChunk(rcx + dx, rcz + dz)) { w.ensureChunk(rcx + dx, rcz + dz); rb--; }
+          }
         }
       }
     }
