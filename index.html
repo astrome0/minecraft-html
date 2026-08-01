@@ -4871,7 +4871,7 @@ class World {
     return id === B.REDSTONE_WIRE || id === B.LEVER || id === B.STONE_BUTTON ||
       id === B.PRESSURE_PLATE || id === B.REDSTONE_LAMP || id === B.REDSTONE_LAMP_LIT ||
       id === B.PISTON || id === B.STICKY_PISTON || id === B.PISTON_HEAD ||
-      id === B.REDSTONE_BLOCK || id === B.REPEATER ||
+      id === B.REDSTONE_BLOCK || id === B.REPEATER || id === B.TNT ||
       id === B.REDSTONE_TORCH || id === B.REDSTONE_TORCH_OFF;
   }
   // the block a redstone torch is attached to (same orientation data as a normal torch)
@@ -5070,7 +5070,28 @@ class World {
       const m = this.torchMount(x, y, z);
       const shouldBeOn = this.redstonePowerTo(m[0], m[1], m[2]) === 0; // inverter: off when its base is powered
       if (shouldBeOn !== (id === B.REDSTONE_TORCH)) this.scheduleTick(x, y, z, 2);
+    } else if (id === B.TNT) {
+      // Deferred by a tick rather than lit inline, for two reasons: igniting removes the block,
+      // which re-enters onRedstoneChange → updateRedstoneOutput, so a wall of TNT would recurse
+      // once per block; and the scheduled queue is already the thing a connected guest drains
+      // without executing, which keeps ignition host-only for free (the host streams the AIR
+      // block and the primed entity back). tickTNT re-checks the power, so a signal that has
+      // gone again in the meantime lights nothing.
+      if (this.redstonePowerTo(x, y, z) > 0) this.scheduleTick(x, y, z, 1);
     }
+  }
+  // one place every ignition goes through: remove the block, spawn the primed entity.
+  // (spawnPrimedTNT itself is already host-authoritative — a guest's flint & steel forwards
+  // the request instead of simulating its own blast.)
+  igniteTNT(x, y, z, fuse) {
+    if (this.getBlock(x, y, z) !== B.TNT) return false;
+    this.setBlock(x, y, z, B.AIR);
+    if (typeof spawnPrimedTNT === 'function') spawnPrimedTNT(this, x + 0.5, y, z + 0.5, fuse || 80);
+    return true;
+  }
+  tickTNT(x, y, z) {
+    if (this.getBlock(x, y, z) !== B.TNT) return;
+    if (this.redstonePowerTo(x, y, z) > 0) this.igniteTNT(x, y, z, 80);
   }
   tickRepeater(x, y, z) {
     if (this.getBlock(x, y, z) !== B.REPEATER) return;
@@ -5193,6 +5214,18 @@ class World {
       const p = game.player;
       if (p && !p.deadFlag && onPlate(p, x, y, z)) occupied = true;
       if (!occupied) for (const e of this.entities) { if (!e.dead && onPlate(e, x, y, z)) { occupied = true; break; } }
+      // The other players stand on plates too. They are not in world.entities (a remote is a
+      // position stream, not an entity), so without this the host never saw a guest on a plate —
+      // and the guest pressing it on its own side went nowhere, because only the host queues
+      // ambient block changes. Host owns the plate now (see the guest gate in tick) and streams
+      // the pressed block back, same as every other world-driven change.
+      if (!occupied && typeof Game !== 'undefined' && Game.mpRole === 'host' &&
+          typeof Net !== 'undefined' && Net.connected && Game.world === this) {
+        for (const rp of Game.remotes.values()) {
+          if (!rp.seen || rp.dead) continue;
+          if (onPlate({ x: rp.dispX, y: rp.dispY, z: rp.dispZ, w: 0.6 }, x, y, z)) { occupied = true; break; }
+        }
+      }
       if (occupied) this.plateHold.set(key, this.tickCount);
       const pressed = (this.getData(x, y, z) & 1) !== 0;
       // stay pressed while occupied OR within the linger window since last occupied
@@ -5712,6 +5745,8 @@ class World {
     if (rng.chance(0.25)) {
       for (const [dx, dy, dz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]) {
         const nid = this.getBlock(x + dx, y + dy, z + dz);
+        // TNT is flammable, so fire used to simply REPLACE it with more fire. Vanilla lights it.
+        if (nid === B.TNT) { this.igniteTNT(x + dx, y + dy, z + dz, 80); continue; }
         if (Blocks[nid].flammable && rng.chance(0.3)) {
           this.setBlock(x + dx, y + dy, z + dz, B.FIRE);
           this.scheduleTick(x + dx, y + dy, z + dz, 30 + rng.nextInt(30));
@@ -5721,7 +5756,10 @@ class World {
     if (rng.chance(0.35) || !Blocks[below].solid) {
       this.setBlock(x, y, z, B.AIR);
     } else {
-      if (Blocks[below].flammable && rng.chance(0.3)) {
+      if (below === B.TNT) {
+        this.setBlock(x, y, z, B.AIR);
+        this.igniteTNT(x, y - 1, z, 80);
+      } else if (Blocks[below].flammable && rng.chance(0.3)) {
         this.setBlock(x, y - 1, z, B.AIR);
         this.setBlock(x, y, z, B.AIR);
       } else this.scheduleTick(x, y, z, 40 + rng.nextInt(40));
@@ -5750,6 +5788,7 @@ class World {
         else if (id === B.FIRE) this.tickFire(v.x, v.y, v.z);
         else if (id === B.STONE_BUTTON) this.tickButton(v.x, v.y, v.z);
         else if (id === B.REPEATER) this.tickRepeater(v.x, v.y, v.z);
+        else if (id === B.TNT) this.tickTNT(v.x, v.y, v.z);
         else if (id === B.REDSTONE_TORCH || id === B.REDSTONE_TORCH_OFF) this.tickRedstoneTorch(v.x, v.y, v.z);
         else if (Blocks[id] && Blocks[id].leaves) {
           const c2 = this.getChunk(v.x >> 4, v.z >> 4);
@@ -5758,8 +5797,8 @@ class World {
         }
       }
     }
-    // pressure plates: pressed while a player/mob stands on them
-    if (this.redstonePlates.size) this.tickPressurePlates(game);
+    // pressure plates: pressed while a player/mob stands on them (host-authoritative)
+    if (!guest && this.redstonePlates.size) this.tickPressurePlates(game);
     // block entities: furnaces + spawners. A guest smelts nothing itself — the host
     // owns every furnace and streams its progress back (else both sides would smelt).
     for (const be of this.blockEntities.values()) {
@@ -5984,9 +6023,9 @@ class World {
           for (const s of be.items) if (s) spawnItemEntity(this, bx + 0.5, by + 0.5, bz + 0.5, s, true);
           be.items = be.items.map(() => null);
         }
+        if (id === B.TNT) { this.igniteTNT(bx, by, bz, 10 + (Math.random() * 20 | 0)); continue; }
         this.setBlock(bx, by, bz, B.AIR);
-        if (id === B.TNT && typeof spawnPrimedTNT === 'function') spawnPrimedTNT(this, bx + 0.5, by, bz + 0.5, 10 + (Math.random() * 20 | 0));
-        else if (Math.random() < 1 / power && typeof spawnItemEntity === 'function') {
+        if (Math.random() < 1 / power && typeof spawnItemEntity === 'function') {
           const def = Blocks[id];
           const rng = RNG((Math.random() * 1e9) | 0);
           const drops = def.drops ? def.drops(rng, 3, null, 0) : [{ id: def.name, n: 1 }];
@@ -11573,8 +11612,7 @@ class Player {
       const fx = hit.x + FACE_N[hit.face][0], fy = hit.y + FACE_N[hit.face][1], fz = hit.z + FACE_N[hit.face][2];
       Sfx.play('ignite');
       if (id === B.TNT) {
-        w.setBlock(hit.x, hit.y, hit.z, B.AIR);
-        spawnPrimedTNT(w, hit.x + 0.5, hit.y, hit.z + 0.5, 80);
+        w.igniteTNT(hit.x, hit.y, hit.z, 80);
       } else if (id === B.OBSIDIAN && Portals.tryIgnite(w, fx, fy, fz)) {
         this.game.achieve('portal');
       } else if (w.getBlock(fx, fy, fz) === B.AIR) {
