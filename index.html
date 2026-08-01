@@ -14839,6 +14839,30 @@ const SPLASHES = [
   'Diamonds are forever!', 'The cake is a lie!', 'Dig deep!', 'Beware of the night!',
 ];
 
+// ---- multiplayer entity-stream tuning ----
+// The 'ents' snapshot was 98% of all relay traffic (measured: 11 KB per message, 10/s, i.e.
+// ~378 MB/hour PER GUEST — and the relay pays that once as ingress plus once per guest as
+// egress). Two things shrink it: rows go on the wire as bare arrays instead of objects with
+// key names, and positions/angles ride as fixed-point integers ("12.34" is 5 characters,
+// 12.34*32 = 395 is 3). 1/32 block is vanilla's own historic entity precision and puppets
+// are smoothed toward the target anyway, so nothing visibly steps.
+const MP_POS_SCALE = 32;   // 1/32 block  (~3 cm)
+const MP_ANG_SCALE = 40;   // 1/40 radian (~1.4 deg)
+// 7 Hz rather than 10. The guest glides puppets toward the streamed target with a ~83 ms
+// time constant, so it comfortably settles between snapshots at this spacing; going slower
+// than this starts to show as lag on a mob that changes direction.
+const MP_ENT_INTERVAL = 0.14;
+// Distance culling. The host used to stream EVERY entity in the world to everyone — 110 mobs
+// when a guest can see maybe 25. The radius is not a guessed constant: each guest reports what
+// it can actually render (`Game.mpViewRadius`), so nothing a guest could have seen is ever
+// dropped, and a phone on a low render distance — the whole point of this fork — saves the most.
+// drawEntities hard-culls at 130 blocks whatever the render distance is, hence the ceiling.
+const MP_ENT_MAX_RADIUS = 130;
+const MP_ENT_MIN_RADIUS = 32;
+// Entities already being tracked stay in the list until they pass radius * this, so a mob
+// wandering across the boundary can't be created and destroyed on alternate snapshots.
+const MP_ENT_HYSTERESIS = 1.15;
+
 const Game = {
   state: 'title', // title|create|loading|play|dead|win
   mode: 'survival', // survival|creative
@@ -14866,6 +14890,8 @@ const Game = {
   selfBodyYaw: null, // third-person body yaw, lags p.yaw (see stepBodyYaw)
   mpDropSeq: 0, mpDropTimer: 0,
   mpEntSeq: 0, mpEntTimer: 0, _remoteProxies: new Map(), mpName: '',
+  // host: per-guest set of entity nids currently streamed to them, for the culling hysteresis
+  mpEntTracked: new Map(),
   hasSkin: false, mySkinData: null, _skinInput: null, _skinInputRect: null,
   mpSlots: 4, // room size the host offers (total players, us included)
   freeSkinSlots: null,
@@ -15034,6 +15060,11 @@ const Game = {
     Net.on('drops', (m) => this.onRemoteDrops(m));      // guest: host's authoritative drop list
     Net.on('give', (m) => this.onRemoteGive(m));        // guest: host handed us a picked-up stack
     Net.on('ents', (m) => this.onRemoteEnts(m));        // guest: host's authoritative mob/projectile snapshot
+    // host: how far this guest can see, so we only stream the entities it could render
+    Net.on('view', (m) => {
+      const r = this.getRemote(m.from);
+      if (r && typeof m.r === 'number') r.viewR = clamp(m.r, MP_ENT_MIN_RADIUS, MP_ENT_MAX_RADIUS);
+    });
     Net.on('spawnReq', (m) => this.onRemoteSpawnReq(m));// host: a guest asked us to spawn a mob/tnt/arrow
     Net.on('mhit', (m) => this.onRemoteMobHit(m));      // host: a guest hit one of our mobs
     Net.on('phit', (m) => this.onRemotePhit(m));        // anyone: another player hit me
@@ -15097,11 +15128,13 @@ const Game = {
     if (!r) return;
     this.remotes.delete(pid);
     this._remoteProxies.delete(pid);
+    this.mpEntTracked.delete(pid);
     this.freeSkinSlot(r.slot);
   },
   clearRemotes() {
     for (const pid of Array.from(this.remotes.keys())) this.removeRemote(pid);
     this._remoteProxies.clear();
+    this.mpEntTracked.clear();
   },
   allocSkinSlot() {
     if (!this.freeSkinSlots) {
@@ -15401,6 +15434,7 @@ const Game = {
     this.isGuest = true; this.mpRole = 'guest';
     this.mpSendHello();
     this.mpSendSkin();
+    this.mpSendViewRadius(true);   // tell the host how far to stream entities to us
     this.currentWorldId = 0;
     const hp = m.hostPos || { x: 8, y: 70, z: 8 };
     // the host remembers every player by name: if we've been on this world before we
@@ -15869,6 +15903,57 @@ const Game = {
     for (const e of w.entities) if (e.puppet && e.stack && !seen.has(e.nid)) e.remove();
   },
   // ---- mob & projectile sync (phase 4c, host-authoritative) ----
+  // Field layout of a packed 'ents' row, derived from the type string alone so BOTH sides
+  // agree without the key names ever going on the wire. Base row is always
+  //   [nid, type, x, y, z, yaw, headYaw, headPitch, flags]
+  // (positions scaled by MP_POS_SCALE, angles by MP_ANG_SCALE) and these extras follow it
+  // positionally. `h`/`mx` are health, `hp` in the decoded row is head PITCH — the confusing
+  // pair of names is the pre-existing wire vocabulary, kept so nothing downstream changes.
+  mpEntExtras(t) {
+    if (t === 'wolf') return ['h', 'mx', 'wm', 'ws', 'wt'];
+    if (t === 'squid') return ['h', 'mx', 'sq'];
+    if (t === 'creeper') return ['h', 'mx', 'fu'];
+    if (MOB_MODELS[t]) return ['h', 'mx'];
+    if (t === 'tnt') return ['fu'];
+    if (t === 'falling_block') return ['b', 'bd'];
+    if (t === 'blaze_fireball' || t === 'ghast_fireball') return ['vx', 'vy', 'vz', 'g'];
+    if (t === 'arrow' || t === 'pearl' || t === 'eye') return ['vx', 'vy', 'vz'];
+    return [];
+  },
+  mpEntExtraValue(e, k) {
+    switch (k) {
+      case 'h': return +(e.hp || 0).toFixed(1);
+      case 'mx': return e.maxHp || 0;
+      case 'wm': return e.model;
+      case 'ws': return e.sitting ? 1 : 0;
+      case 'wt': return e.tamed ? 1 : 0;
+      case 'sq': return +(e.squidTilt || 0).toFixed(2);
+      case 'fu': return +((e.type === 'creeper' ? e.fuseT : e.fuse) || 0).toFixed(2);
+      case 'b': return e.blockId;
+      case 'bd': return e.data;
+      case 'g': return e.big ? 1 : 0;
+      case 'vx': return +(e.vx || 0).toFixed(2);
+      case 'vy': return +(e.vy || 0).toFixed(2);
+      case 'vz': return +(e.vz || 0).toFixed(2);
+    }
+    return 0;
+  },
+  // Turn a wire row back into the keyed object the rest of the guest code already expects,
+  // so unpacking is the ONLY thing that changed on the receiving side. A plain object is
+  // passed straight through: a client on a newer build still understands a host that is
+  // still sending the old keyed format (the reverse can't be helped).
+  mpUnpackEntRow(row) {
+    if (!Array.isArray(row)) return row;
+    const o = {
+      n: row[0], t: row[1],
+      x: row[2] / MP_POS_SCALE, y: row[3] / MP_POS_SCALE, z: row[4] / MP_POS_SCALE,
+      r: row[5] / MP_ANG_SCALE, hy: row[6] / MP_ANG_SCALE, hp: row[7] / MP_ANG_SCALE,
+      f: row[8],
+    };
+    const ex = this.mpEntExtras(o.t);
+    for (let i = 0; i < ex.length; i++) o[ex[i]] = row[9 + i];
+    return o;
+  },
   // Entity types the host streams to the guest (drops have their own channel;
   // rideables and the dragon fight aren't synced yet).
   mpIsSyncedEnt(e) {
@@ -15882,9 +15967,12 @@ const Game = {
   mpBroadcastEnts(dt) {
     if (this.mpRole !== 'host' || !Net.connected || !this.world) return;
     this.mpEntTimer += dt;
-    if (this.mpEntTimer < 0.1) return; // ~10 Hz
+    if (this.mpEntTimer < MP_ENT_INTERVAL) return;
     this.mpEntTimer = 0;
-    const w = this.world, list = [];
+    const w = this.world;
+    // Build every row ONCE (rows are immutable here, so all guests can share them) and note
+    // where each entity is, then hand each guest only what it could actually render.
+    const rows = [];
     for (const e of w.entities) {
       if (!this.mpIsSyncedEnt(e)) continue;
       if (e.nid == null) e.nid = ++this.mpEntSeq;
@@ -15892,27 +15980,62 @@ const Game = {
       if (e.hurtT > 0.15) f |= 1;
       if (e.deathT > 0) f |= 2;
       if (e.onGround) f |= 4;
-      const row = {
-        n: e.nid, t: e.type,
-        x: +e.x.toFixed(2), y: +e.y.toFixed(2), z: +e.z.toFixed(2),
-        r: +(e.yaw || 0).toFixed(2), hy: +(e.headYaw || 0).toFixed(2), hp: +(e.headPitch || 0).toFixed(2),
-        f,
-      };
-      if (e.hp != null && MOB_MODELS[e.type]) { row.h = e.hp; row.mx = e.maxHp; }
-      // a wolf's look is all state (collar colour, sitting, angry eyes), so it has to ride along
-      if (e.type === 'wolf') { row.wm = e.model; row.ws = e.sitting ? 1 : 0; row.wt = e.tamed ? 1 : 0; }
-      if (e.type === 'squid') row.sq = +(e.squidTilt || 0).toFixed(2);
-      if (e.type === 'creeper') row.fu = +(e.fuseT || 0).toFixed(2);
-      else if (e.type === 'tnt') row.fu = +(e.fuse || 0).toFixed(2);
-      if (e.type === 'falling_block') { row.b = e.blockId; row.bd = e.data; }
-      if (e.type === 'blaze_fireball' || e.type === 'ghast_fireball') row.g = e.big ? 1 : 0;
-      if (e.type === 'arrow' || e.type === 'pearl' || e.type === 'eye' ||
-          e.type === 'blaze_fireball' || e.type === 'ghast_fireball') {
-        row.vx = +e.vx.toFixed(2); row.vy = +e.vy.toFixed(2); row.vz = +e.vz.toFixed(2);
-      }
-      list.push(row);
+      // packed row — see mpEntExtras for the per-type tail. Everything a wolf/squid/creeper/
+      // projectile used to carry as named keys still rides along, just positionally.
+      const row = [
+        e.nid, e.type,
+        Math.round(e.x * MP_POS_SCALE), Math.round(e.y * MP_POS_SCALE), Math.round(e.z * MP_POS_SCALE),
+        Math.round((e.yaw || 0) * MP_ANG_SCALE), Math.round((e.headYaw || 0) * MP_ANG_SCALE),
+        Math.round((e.headPitch || 0) * MP_ANG_SCALE), f,
+      ];
+      for (const k of this.mpEntExtras(e.type)) row.push(this.mpEntExtraValue(e, k));
+      rows.push({ nid: e.nid, x: e.x, z: e.z, row });
     }
-    Net.send('ents', { list });
+    const per = [];
+    for (const r of this.remotes.values()) {
+      // Nothing has arrived from this peer yet, so we don't know where it is — culling on a
+      // (0,0) position would send it the wrong corner of the world. Send the lot until its
+      // first `pos`; that's at most a fraction of a second.
+      const rad = r.seen ? (r.viewR || MP_ENT_MAX_RADIUS) : MP_ENT_MAX_RADIUS;
+      const inR = rad * rad, outR = rad * rad * MP_ENT_HYSTERESIS * MP_ENT_HYSTERESIS;
+      const was = this.mpEntTracked.get(r.pid);
+      const now = new Set();
+      const list = [];
+      for (const it of rows) {
+        let keep;
+        if (!r.seen) keep = true;
+        else {
+          const dx = it.x - r.dispX, dz = it.z - r.dispZ, d2 = dx * dx + dz * dz;
+          // already tracked → hold on until it's clearly out, so the boundary can't flicker
+          keep = d2 <= inR || (was && was.has(it.nid) && d2 <= outR);
+        }
+        if (!keep) continue;
+        now.add(it.nid);
+        list.push(it.row);
+      }
+      per.push({ pid: r.pid, list, nids: now });
+    }
+    if (!per.length) return;
+    // Which is cheaper for the relay? A targeted list is paid for TWICE (our uplink, then the
+    // egress to that one guest), while a broadcast is paid for once on uplink and once per
+    // guest on egress. So culling only wins while the lists are genuinely smaller — with a
+    // full room standing together at max render distance each culled list is nearly the whole
+    // world, and N targeted copies would cost more than the single broadcast we replaced.
+    // Row counts stand in for bytes here; they're proportional enough to pick the winner.
+    let targeted = 0;
+    for (const p of per) targeted += p.list.length;
+    targeted *= 2;
+    const broadcast = rows.length * (1 + per.length);
+    if (per.length >= 2 && targeted >= broadcast) {
+      const all = rows.map(it => it.row), allNids = new Set(rows.map(it => it.nid));
+      for (const p of per) this.mpEntTracked.set(p.pid, allNids);
+      Net.send('ents', { list: all });
+      return;
+    }
+    for (const p of per) {
+      this.mpEntTracked.set(p.pid, p.nids);
+      Net.send('ents', { list: p.list }, p.pid);
+    }
   },
   // Guest: reconcile our puppet mobs/projectiles with the host's snapshot.
   onRemoteEnts(m) {
@@ -15920,7 +16043,8 @@ const Game = {
     const w = this.world, seen = new Set();
     const byNid = new Map();
     for (const e of w.entities) if (e.puppet && !e.stack && e.nid != null) byNid.set(e.nid, e);
-    for (const row of m.list) {
+    for (const raw of m.list) {
+      const row = this.mpUnpackEntRow(raw);
       seen.add(row.n);
       let e = byNid.get(row.n);
       if (!e) { e = this.mpMakePuppet(row); if (!e) continue; w.entities.push(e); }
@@ -15970,6 +16094,20 @@ const Game = {
         break;
       }
     }
+  },
+  // ---- how far this client can actually see entities (guest -> host, for culling) ----
+  // Two independent limits: fog swallows everything past the render distance, and
+  // drawEntities refuses to draw an entity beyond 130 blocks no matter what.
+  mpViewRadius() {
+    return clamp(this.renderDist * 16, MP_ENT_MIN_RADIUS, MP_ENT_MAX_RADIUS);
+  },
+  // Cheap to call every frame: only actually sends when the player changes the slider.
+  mpSendViewRadius(force) {
+    if (!this.isGuest || !Net.connected) return;
+    const r = this.mpViewRadius();
+    if (!force && r === this._sentViewR) return;
+    this._sentViewR = r;
+    Net.send('view', { r }, 0);
   },
   // Guest: ask the host to spawn a host-authoritative entity on our behalf.
   mpSpawnRequest(kind, data) {
@@ -16870,6 +17008,7 @@ const Game = {
         this.selfBodyYaw, p.yaw, dt,
         Math.hypot(p.vx, p.vz) > 0.35 ? Math.atan2(p.vx, -p.vz) : null);
       this.sendMyPos(dt);
+      this.mpSendViewRadius();   // no-op unless the render-distance slider actually moved
       this.mpFlushAmbient(dt);
       this.mpBroadcastDrops(dt);
       this.mpTickContainers(dt);
