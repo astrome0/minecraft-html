@@ -466,7 +466,7 @@ for (const d in POTTED) POT_DATA_FOR[POTTED[d].item] = +d;
 // models that are drawn as a flat sprite in the hand / as a dropped item, never as a cube
 // held / dropped as a flat item sprite instead of a mini cube — a bed belongs here, a cube of
 // blanket is not what you carry (and its block tiles are per-half, so there is no one cube tile)
-const FLAT_MODELS = ['cross', 'crop', 'rail', 'pot', 'bed'];
+const FLAT_MODELS = ['cross', 'crop', 'rail', 'pot', 'bed', 'lever', 'button', 'plate', 'repeater'];
 function blockIsFlat(id) { const d = Blocks[id]; return !!(d && FLAT_MODELS.includes(d.model)); }
 
 // def fields:
@@ -816,6 +816,14 @@ function blockSolidTop(id, data = 0) {
   if (d.model === 'stairs') return (data & 4) !== 0;
   return d.model === 'cube' || d.model === 'soulsand' || d.model === 'farmland' || d.model === 'piston';
 }
+// What a STANDING torch may sit on. Same as blockSolidTop plus a fence post: its top face
+// isn't a full square, so blockSolidTop says no, but capping a fence with a torch is
+// everyday vanilla. A fence GATE is deliberately not included — vanilla refuses that too.
+function blockSupportsTorch(id, data = 0) {
+  const d = Blocks[id];
+  if (d && d.model === 'fence') return true;
+  return blockSolidTop(id, data);
+}
 // mining time in seconds
 function blockBreakTime(id, heldItem) {
   const def = Blocks[id];
@@ -854,14 +862,39 @@ function defItem(id, def) { def.id = id; if (def.stack === undefined) def.stack 
 // auto items for all placeable blocks
 for (const bd of Blocks) {
   if (!bd || bd.id === B.AIR) continue;
-  if (['water', 'lava', 'fire', 'nether_portal', 'end_portal', 'wheat_crop', 'furnace_lit', 'grass_snow', 'farmland', 'redstone_wire', 'redstone_lamp_lit', 'piston_head', 'redstone_torch_off'].includes(bd.name)) continue;
+  // blocks that only ever exist PLACED, so they must not become items of their own.
+  // wall_sign is one of them: the `sign` item already places either kind depending on the
+  // face you click, so an auto item for it was a SECOND sign in the creative grid that
+  // couldn't be placed (placeBlock puts a wall sign down with no wall behind it).
+  if (['water', 'lava', 'fire', 'nether_portal', 'end_portal', 'wheat_crop', 'furnace_lit', 'grass_snow', 'farmland', 'redstone_wire', 'redstone_lamp_lit', 'piston_head', 'redstone_torch_off', 'wall_sign'].includes(bd.name)) continue;
   if (Items[bd.name]) continue;
   defItem(bd.name, { label: bd.label, block: bd.id, icon: null });
+}
+// Item ids that used to exist and no longer do. A save (or a chest, or a guest's character
+// on the wire) can still be carrying one, and holding an id that isn't in Items crashes
+// drawViewModel — so every stack read back from storage goes through fixStack.
+const ITEM_ALIASES = { wall_sign: 'sign' };
+function fixStack(s) {
+  if (!s || !s.id || !(s.n > 0)) return null;
+  const id = ITEM_ALIASES[s.id] || s.id;
+  if (!Items[id]) return null;
+  return id === s.id ? s : Object.assign({}, s, { id });
+}
+function fixStacks(arr, n) {
+  const out = new Array(n).fill(null);
+  if (Array.isArray(arr)) for (let i = 0; i < n; i++) out[i] = fixStack(arr[i]);
+  return out;
 }
 Items['door'].stack = 64; Items['bed'].stack = 1;
 // the pot is drawn as a flat sprite (model 'pot' is in FLAT_MODELS), so it needs a real
 // item tile — the auto iso-cube icon would just be a terracotta block
 Items['flower_pot'].icon = 'i_flower_pot';
+// same for the redstone parts that place as a small box — as an iso cube the lever was a wood
+// block, the button a stone block and the plate a planks block, all unrecognisable in the hotbar
+Items['lever'].icon = 'i_lever';
+Items['stone_button'].icon = 'i_stone_button';
+Items['pressure_plate'].icon = 'i_pressure_plate';
+Items['repeater'].icon = 'i_repeater';
 
 // materials
 defItem('stick', { label: 'Stick', icon: 'i_stick', fuel: 100 });
@@ -2461,6 +2494,76 @@ function buildItemTextures() {
     for (let x = 5; x < 11; x++) s(x, 7, [78, 54, 38]);        // soil in the mouth
     for (let x = 6; x < 10; x++) s(x, 13, [104, 62, 46]);      // base shadow
   });
+  // Redstone parts whose PLACED model is a small box on a wall/floor. Left to the generic
+  // iso-cube icon they came out as a plain wood / stone / planks cube — indistinguishable in
+  // the hotbar. Each gets an item sprite drawn to look like the thing you're about to place.
+  const stoneNoise = (r) => { const v = r.next(); return v < 0.25 ? [104, 104, 104] : v < 0.62 ? [124, 124, 124] : [138, 138, 138]; };
+  // lever: the cobble base at the bottom with the wooden handle leaning off it
+  T.reg('i_lever', (s, r) => {
+    clearTex(s);
+    for (let y = 10; y < 15; y++) for (let x = 3; x < 13; x++) s(x, y, stoneNoise(r));
+    for (let x = 3; x < 13; x++) s(x, 10, [152, 152, 152]);    // lit top edge of the base
+    for (let x = 3; x < 13; x++) s(x, 14, [76, 76, 76]);       // shadow under it
+    for (let y = 10; y < 15; y++) { s(3, y, [150, 150, 150]); s(12, y, [88, 88, 88]); }
+    lineArt(s, 7, 11, 11, 4, [96, 66, 38], 2);                 // handle
+    lineArt(s, 7, 11, 11, 4, [138, 98, 56], 1);
+    blobArt(s, 11, 3, 2.1, 2.1, [122, 86, 50], [88, 60, 34]);  // knob on the end
+    s(10, 2, [158, 116, 68]);
+  });
+  // stone button: the little box seen head-on, bevelled so it reads as something that sticks out
+  T.reg('i_stone_button', (s, r) => {
+    clearTex(s);
+    for (let y = 5; y < 12; y++) for (let x = 2; x < 14; x++) s(x, y, stoneNoise(r));
+    for (let x = 2; x < 14; x++) { s(x, 5, [158, 158, 158]); s(x, 11, [78, 78, 78]); }
+    for (let y = 5; y < 12; y++) { s(2, y, [150, 150, 150]); s(13, y, [82, 82, 82]); }
+    s(13, 5, [116, 116, 116]); s(2, 11, [116, 116, 116]);      // soften the two mixed corners
+  });
+  // pressure plate: the plate seen from above at an angle — a flat plank diamond with a lip
+  T.reg('i_pressure_plate', (s, r) => {
+    clearTex(s);
+    const RX = 7.2, RY = 3.7, CX = 8, CY = 7.2;
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const dx = Math.abs(x + 0.5 - CX) / RX, dy = Math.abs(y + 0.5 - CY) / RY;
+      if (dx + dy > 1) continue;
+      const c = mixc([156, 127, 78], [131, 106, 61], r.next() * 0.5);
+      s(x, y, dx + dy > 0.86 ? shade(c, 0.86) : c);
+    }
+    for (let i = 0; i < 5; i++) {                              // a little grain along the boards
+      const gy = 5 + r.nextInt(4), half = Math.round((1 - Math.abs(gy + 0.5 - CY) / RY) * RX);
+      for (let x = CX - half + 1; x < CX + half - 1; x += 2) s(Math.round(x), gy, [121, 97, 58]);
+    }
+    for (let x = 0; x < 16; x++) {                             // the 1px lip, so it isn't a flat sticker
+      const dx = Math.abs(x + 0.5 - CX) / RX;
+      if (dx > 1) continue;
+      // the LAST row the diamond painted in this column — the -0.5 matches the pixel-centre
+      // test above, without it the lip lands a row low and leaves a hole in the silhouette
+      const yb = Math.floor(CY - 0.5 + (1 - dx) * RY);
+      s(x, yb + 1, [104, 83, 50]);
+      s(x, yb + 2, [82, 65, 39]);
+    }
+  });
+  // repeater: the same plate shape in smooth stone, with the two little torches standing on it
+  T.reg('i_repeater', (s, r) => {
+    clearTex(s);
+    const RX = 7.2, RY = 3.6, CX = 8, CY = 9.6;
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const dx = Math.abs(x + 0.5 - CX) / RX, dy = Math.abs(y + 0.5 - CY) / RY;
+      if (dx + dy > 1) continue;
+      const c = r.chance(0.28) ? [166, 166, 170] : [182, 182, 186];
+      s(x, y, dx + dy > 0.86 ? shade(c, 0.84) : c);
+    }
+    for (let x = 0; x < 16; x++) {
+      const dx = Math.abs(x + 0.5 - CX) / RX;
+      if (dx > 1) continue;
+      const yb = Math.floor(CY - 0.5 + (1 - dx) * RY);
+      s(x, yb + 1, [128, 128, 132]);
+    }
+    for (const [tx, ty] of [[5, 5], [10, 3]]) {                // the two torches, back one higher up
+      for (let y = ty + 2; y < ty + 5; y++) { s(tx, y, [110, 84, 48]); s(tx + 1, y, [88, 64, 34]); }
+      s(tx, ty, [255, 120, 96]); s(tx + 1, ty, [255, 120, 96]);
+      s(tx, ty + 1, [226, 52, 42]); s(tx + 1, ty + 1, [226, 52, 42]);
+    }
+  });
   T.reg('i_blaze_rod', (s) => {
     clearTex(s);
     lineArt(s, 4, 12, 12, 4, [255, 200, 60], 2);
@@ -3133,6 +3236,7 @@ function buildIcons() {
     else if (bd.model === 'sign' || bd.model === 'wall_sign') icon = signIcon();
     else if (bd.model === 'iframe') icon = frameIcon();
     else if (bd.model === 'pot') icon = tileCanvas('i_flower_pot');
+    else if (bd.model === 'lever' || bd.model === 'button' || bd.model === 'plate' || bd.model === 'repeater') icon = tileCanvas(Items[bd.name].icon);
     else if (bd.model === 'gate') icon = gateIcon();
     else if (bd.model === 'fence') icon = fenceIcon();
     else {
@@ -4525,8 +4629,13 @@ class World {
     const oldDef = Blocks[oldId], newDef = Blocks[id];
     c.blocks[i] = id; c.data[i] = data;
     this.edits.set(x + ',' + y + ',' + z, [id, data]);
-    // multiplayer: collect player-caused block changes for broadcast (see Game.mpBeginEdit)
-    if (typeof Game !== 'undefined' && Game.mpCapturing) Game.mpCapturing.push([x, y, z, id, data]);
+    // multiplayer: a player action is captured by Game.mpBeginEdit; anything else that moves
+    // a block (explosion, leaf decay, fluid, fire, redstone, crops) is the HOST's world doing
+    // its own thing, and mpQueueAmbient is what gets that out to the guests too.
+    if (typeof Game !== 'undefined') {
+      if (Game.mpCapturing) Game.mpCapturing.push([x, y, z, id, data]);
+      else if (Game.mpQueueAmbient) Game.mpQueueAmbient(this, x, y, z, id, data);
+    }
     // track pressure plates so the world tick can poll them for entities
     if (id === B.PRESSURE_PLATE) this.redstonePlates.add(x + ',' + y + ',' + z);
     else if (oldId === B.PRESSURE_PLATE) this.redstonePlates.delete(x + ',' + y + ',' + z);
@@ -4614,7 +4723,7 @@ class World {
         // upside-down stairs included, like vanilla. placeBlock already allows exactly that
         // (`blockSolidTop`), and demanding a full opaque block here instead is what popped a
         // freshly placed torch straight back off a slab — and duplicated it over the wire.
-        if (!blockSolidTop(this.getBlock(x, y - 1, z), this.getData(x, y - 1, z))) return this.breakBlock(x, y, z, null, true);
+        if (!blockSupportsTorch(this.getBlock(x, y - 1, z), this.getData(x, y - 1, z))) return this.breakBlock(x, y, z, null, true);
       } else {
         const att = [null, [-1, 0, 0], [1, 0, 0], [0, 0, -1], [0, 0, 1]][d] || [0, -1, 0];
         const sup = Blocks[this.getBlock(x + att[0], y + att[1], z + att[2])];
@@ -5622,13 +5731,20 @@ class World {
   // ---------- world tick (20 tps) ----------
   tick(game) {
     this.tickCount++;
+    // A connected guest runs NO world simulation of its own. The host owns all of it and
+    // streams the resulting blocks (Game.mpQueueAmbient), so simulating here would only
+    // fight that — and worse, a guest-side break calls spawnItemEntity, which forwards a
+    // drop request to the host, so both sides deciding the same leaf/fluid/fire broke a
+    // block hands out the item twice. Same rule furnaces and mob spawning already follow.
+    const guest = typeof Game !== 'undefined' && Game.isGuest && typeof Net !== 'undefined' && Net.connected;
     // scheduled ticks
     if (this.tickQueue.size) {
       const due = [];
       for (const [k, v] of this.tickQueue) {
         if (v.due <= this.tickCount) { due.push(v); this.tickQueue.delete(k); }
       }
-      for (const v of due) {
+      // a guest still DRAINS the queue (or it grows without bound), it just doesn't act on it
+      if (!guest) for (const v of due) {
         const id = this.getBlock(v.x, v.y, v.z);
         if (id === B.WATER || id === B.LAVA) this.tickFluid(v.x, v.y, v.z);
         else if (id === B.FIRE) this.tickFire(v.x, v.y, v.z);
@@ -5646,12 +5762,12 @@ class World {
     if (this.redstonePlates.size) this.tickPressurePlates(game);
     // block entities: furnaces + spawners. A guest smelts nothing itself — the host
     // owns every furnace and streams its progress back (else both sides would smelt).
-    const guest = typeof Game !== 'undefined' && Game.isGuest && typeof Net !== 'undefined' && Net.connected;
     for (const be of this.blockEntities.values()) {
       if (be.type === 'furnace') { if (!guest) this.tickFurnace(be); }
       else if (be.type === 'spawner') this.tickSpawner(be, game);
     }
-    // random ticks: crops, saplings, grass spread — only near player
+    // random ticks: crops, saplings, grass spread — only near player, host only
+    if (guest) return;
     const p = game.player;
     const pcx = floor(p.x) >> 4, pcz = floor(p.z) >> 4;
     for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
@@ -5753,11 +5869,10 @@ class World {
     // below, and that is what brings the guest's canopy down.
     if (mpOn && Game.isGuest) return;
     if (typeof Particles !== 'undefined') Particles.blockBreak(this, x, y, z, this.getBlock(x, y, z));
-    // this runs from a tick, never inside a player action, so no capture is open to clobber
-    const capture = mpOn && Game.mpRole && Game.mpCapturing == null;
-    if (capture) Game.mpBeginEdit();
+    // The removal reaches the guests through the host's ambient capture (mpQueueAmbient),
+    // which batches a whole collapsing canopy into one message per 50ms. This used to open
+    // its own mpBeginEdit/mpEndEdit here, i.e. one relay message per leaf.
     this.breakBlock(x, y, z, null, true); // dropAlways, so the sapling/apple roll still runs
-    if (capture) Game.mpEndEdit();
     // this leaf was propping up its neighbours, so they get re-checked too — that is what
     // carries the collapse past the radius of the original scheduleLeafDecay
     for (const [ox, oy, oz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]) {
@@ -5896,6 +6011,18 @@ class World {
       if (dist < r) {
         const f = 1 - dist / r;
         Game.player.takeDamage(Math.round((f * f + f) * 7 * power / 3 + 1), { x, y, z, knock: f * 1.8 });
+      }
+    }
+    // ...and the other players. An explosion only ever runs on the host (TNT/creepers are
+    // host-authoritative), so nothing was telling a guest it had just been blown up — they
+    // took zero damage from a TNT that had removed the ground under them.
+    if (typeof Game !== 'undefined' && Game.mpRole === 'host' && Game.world === this && Net.connected) {
+      for (const rp of Game.remotes.values()) {
+        if (!rp.seen || rp.dead) continue;
+        const dist = Math.hypot(rp.dispX - x, rp.dispY + 0.9 - y, rp.dispZ - z);
+        if (dist >= r) continue;
+        const f = 1 - dist / r;
+        Game.mpSendPhit(rp.pid, Math.round((f * f + f) * 7 * power / 3 + 1), x, z, false);
       }
     }
     if (typeof Sfx !== 'undefined') Sfx.play('explosion', { pos: [x, y, z], vol: 1 });
@@ -8703,7 +8830,10 @@ class ItemEntity extends Entity {
       if (hostFar) {
         let near = null, nearD = 2;
         for (const r of Game.remotes.values()) {
-          if (!r.seen) continue;
+          // a DEAD guest must not be collected for — their body is still streaming its
+          // position from the death spot, so without this the host magnets the stacks they
+          // just dropped straight back into their inventory: keep-inventory by accident
+          if (!r.seen || r.dead) continue;
           const d = Math.hypot(r.dispX - this.x, r.dispY + 0.9 - this.y, r.dispZ - this.z);
           if (d < nearD) { nearD = d; near = r; }
         }
@@ -8809,7 +8939,7 @@ class Arrow extends Entity {
     // multiplayer (host): arrows can strike any remote player except their own shooter
     if (game && game.mpRemoteHittable && game.mpRemoteHittable()) {
       for (const rt of game.remotes.values()) {
-        if (!rt.seen || rt.pid === this.ownerPid) continue;
+        if (!rt.seen || rt.dead || rt.pid === this.ownerPid) continue;
         const bb = [rt.dispX - 0.4, rt.dispY - 0.1, rt.dispZ - 0.4, rt.dispX + 0.4, rt.dispY + 1.9, rt.dispZ + 0.4];
         const r = rayBox(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, bb);
         if (r && r.t < step && r.t < hitT) {
@@ -10619,7 +10749,7 @@ class Player {
     this.regenT = 0; this.starveT = 0; this.regenEffect = 0; this.hungerEffect = 0;
     this.spawnX = 0; this.spawnY = 80; this.spawnZ = 0; this.bedSpawn = null;
     this.useCd = 0;
-    this.bobT = 0; this.bobAmp = 0;
+    this.bobT = 0; this.bobAmp = 0; this.limbAmp = 0;
     this.eyeH = 1.62;
     this.lastDamage = 0;
     this.doubleTapW = 0;
@@ -10804,9 +10934,15 @@ class Player {
     // sprint exhaustion by distance
     const moved = Math.hypot(dx, dz);
     if (this.sprinting) this.addExhaustion(moved * 0.1);
-    // view bob
+    // view bob — camera only, and it must stop the moment you leave the ground (vanilla
+    // doesn't bob the view mid-jump)
     this.bobAmp = lerp(this.bobAmp, this.onGround ? clamp(Math.hypot(this.vx, this.vz) / 5, 0, 1) : 0, dt * 8);
     this.bobT += Math.hypot(dx, dz) * 1.8;
+    // ...but the LIMBS are a separate thing (vanilla's limbSwingAmount): driven purely by how
+    // fast you're actually travelling, with no onGround test. That's what keeps the legs and
+    // arms running while you jump mid-sprint, and lets them wind down on a jump straight up.
+    // Third person used to borrow bobAmp for this, so the model froze solid in the air.
+    this.limbAmp = lerp(this.limbAmp, clamp(Math.hypot(this.vx, this.vz) / 5, 0, 1), dt * 8);
     // damage sources
     if (inLava) {
       this.fireT = Math.max(this.fireT, 7);
@@ -10920,6 +11056,7 @@ class Player {
     if (this.useCd > 0) this.useCd -= dt;
     if (this.hurtFlash > 0) this.hurtFlash -= dt;
     this.bobAmp = lerp(this.bobAmp, 0, dt * 8);
+    this.limbAmp = lerp(this.limbAmp, 0, dt * 8);
     this.updatePortal(dt, game);
   }
   updatePortal(dt, game) {
@@ -10985,6 +11122,9 @@ class Player {
     this.mining = null;
     this.eating = 0; this.bowCharge = -1;
     if (this.riding) { this.riding.rider = null; this.riding = null; }
+    // tell the room we're dead BEFORE the drops go out — the host's pickup-on-behalf
+    // would otherwise hand our whole inventory straight back to us
+    if (this.game.mpSendPosNow) this.game.mpSendPosNow();
     // drop inventory
     for (let i = 0; i < 36; i++) {
       const s = this.inventory.slots[i];
@@ -11007,6 +11147,7 @@ class Player {
     let sp = this.bedSpawn || { x: this.spawnX, y: this.spawnY, z: this.spawnZ };
     this.x = sp.x; this.y = sp.y; this.z = sp.z;
     this.fallStart = this.y;
+    if (this.game.mpSendPosNow) this.game.mpSendPosNow(); // alive again, at the bed/spawn
   }
 
   // ---------- mining ----------
@@ -11524,7 +11665,10 @@ class Player {
         w.setBlock(fx, fy, fz, held.id === 'water_bucket' ? B.WATER : B.LAVA, 0);
         w.scheduleTick(fx, fy, fz, 4);
         Sfx.play(held.id === 'water_bucket' ? 'splash' : 'lavaPop');
-        this.inventory.slots[this.selected] = mkStack('bucket', 1);
+        // The bucket paths swap the slot directly, so they bypass consumeHeld() and its
+        // creative check — in creative a full bucket stays full, like vanilla, instead of
+        // being a one-shot you have to re-fetch from the item grid after every pour.
+        if (this.game.mode !== 'creative') this.inventory.slots[this.selected] = mkStack('bucket', 1);
         this.useCd = 0.3;
       }
       return;
@@ -11547,7 +11691,10 @@ class Player {
           w.setBlock(bx, by, bz, B.AIR);
           const held = this.heldItem();
           const filled = mkStack(id === B.WATER ? 'water_bucket' : 'lava_bucket', 1);
-          if (held.n === 1) this.inventory.slots[this.selected] = filled;
+          // creative: scooping picks the source up but leaves the inventory alone (vanilla's
+          // instabuild branch) — the empty bucket is infinite, and a filled one is one grid click away
+          if (this.game.mode === 'creative') { /* keep the empty bucket, add nothing */ }
+          else if (held.n === 1) this.inventory.slots[this.selected] = filled;
           else { held.n--; if (this.inventory.add(filled) > 0) spawnItemEntity(w, this.x, this.y + 1, this.z, filled, true); }
           Sfx.play(id === B.WATER ? 'splash' : 'lavaPop');
           this.useCd = 0.3;
@@ -11648,7 +11795,7 @@ class Player {
         // wall attach: face 1 (+x normal): attached block is at -x → data 1
         data = { 1: 1, 3: 2, 2: 3, 0: 4 }[hit.face];
       }
-      if (data === 0 && !blockSolidTop(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz))) return;
+      if (data === 0 && !blockSupportsTorch(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz))) return;
     }
     if (bid === B.SAPLING || bid === B.DANDELION || bid === B.POPPY || bid === B.MUSHROOM_BROWN || bid === B.MUSHROOM_RED) {
       const below = w.getBlock(px, py - 1, pz);
@@ -12750,7 +12897,7 @@ const UI = {
   // tag only shows with a clear line of sight and at reduced opacity (harder to spot).
   drawRemoteNametags(game) {
     for (const r of game.remotes.values()) {
-      if (r.seen && r.name) this.drawRemoteNametag(game, r);
+      if (r.seen && r.name && !r.dead) this.drawRemoteNametag(game, r);
     }
   },
   drawRemoteNametag(game, r) {
@@ -14677,6 +14824,8 @@ const Game = {
   // multiplayer (see js/net.js). mpRole: null|'host'|'guest'.
   // remotes: pid -> the other players' interpolated state (the host is always pid 0).
   mpRole: null, isGuest: false, remotes: new Map(), mpPosTimer: 0, mpCapturing: null,
+  mpAmbient: null, mpAmbientTimer: 0, mpApplyingRemote: false,
+  selfBodyYaw: null, // third-person body yaw, lags p.yaw (see stepBodyYaw)
   mpDropSeq: 0, mpDropTimer: 0,
   mpEntSeq: 0, mpEntTimer: 0, _remoteProxies: new Map(), mpName: '',
   hasSkin: false, mySkinData: null, _skinInput: null, _skinInputRect: null,
@@ -14898,7 +15047,7 @@ const Game = {
         pid, name: '', seen: false,
         tx: 0, ty: 0, tz: 0, dispX: 0, dispY: 0, dispZ: 0,
         yaw: 0, pitch: 0, walkT: 0, walkAmp: 0, age: 0, swing: 1,
-        held: null, mine: null, sn: 0, sleeping: false,
+        held: null, mine: null, sn: 0, sleeping: false, dead: false, bodyYaw: null,
         hasSkin: false, slot: this.allocSkinSlot(),
       };
       this.remotes.set(pid, r);
@@ -15219,16 +15368,9 @@ const Game = {
     // the host remembers every player by name: if we've been on this world before we
     // get our own inventory / health / position back instead of a fresh character
     const d = m.pdata;
-    // the stacks come off the wire: drop anything this build doesn't know, otherwise
+    // the stacks come off the wire: retire anything this build doesn't know, otherwise
     // holding an unknown item id crashes the view-model renderer
-    const clean = (arr, n) => {
-      const out = new Array(n).fill(null);
-      if (Array.isArray(arr)) for (let i = 0; i < n; i++) {
-        const s = arr[i];
-        if (s && s.id && Items[s.id] && s.n > 0) out[i] = s;
-      }
-      return out;
-    };
+    const clean = fixStacks;
     // only reuse the saved position if we left from the dimension the host is in now
     // (guests always play in the host's dimension), otherwise land next to the host
     const samePlace = d && (d.dim || 'overworld') === (m.dim || 'overworld');
@@ -15263,6 +15405,7 @@ const Game = {
     r.held = m.held != null ? m.held : null;
     r.mine = m.mine || null;
     r.sn = m.sn ? 1 : 0;
+    r.dead = !!m.dd;
     if (!r.seen) { r.seen = true; r.dispX = m.x; r.dispY = m.y; r.dispZ = m.z; }
   },
   updateRemotes(dt) {
@@ -15273,10 +15416,57 @@ const Game = {
       r.dispX += (r.tx - r.dispX) * k;
       r.dispY += (r.ty - r.dispY) * k;
       r.dispZ += (r.tz - r.dispZ) * k;
-      const moved = Math.hypot(r.dispX - ox, r.dispZ - oz);
+      const mvx = r.dispX - ox, mvz = r.dispZ - oz;
+      const moved = Math.hypot(mvx, mvz);
       r.walkAmp = clamp(moved / Math.max(dt, 0.001) / 4, 0, 1);
       r.walkT += moved * 3.2;
+      // body lags the head, vanilla-style. Derived locally from the streamed yaw + how they're
+      // moving, so this costs nothing on the wire.
+      const moveYaw = moved > dt * 0.35 ? Math.atan2(mvx, -mvz) : null;
+      r.bodyYaw = this.stepBodyYaw(r.bodyYaw, r.yaw, dt, moveYaw);
+      // a mob that already holds this player's proxy as its foe only lets go when the
+      // proxy says dead — and mpNearestRemoteTarget skips the dead, so it never refreshes it
+      const px = this._remoteProxies.get(r.pid);
+      if (px) px.deadFlag = !!r.dead;
     }
+  },
+  // ---- vanilla head/body turn split ----
+  // In vanilla you don't pivot as one lump: the head follows your look straight away and the
+  // body stays put, only being dragged round once the twist passes a limit — and it snaps to
+  // face the way you're walking. Live-tunable from the console like crouchPose:
+  //   MC.game.bodyTurn.limit = 60   (all values in DEGREES / per-second rates)
+  bodyTurn: {
+    limit: 50,   // resting twist: how far the head may lead the body
+    ease: 8,     // how fast (per second) the body settles back to `limit` after a fast turn
+    walk: 9,     // how fast the body snaps to the direction you're moving
+    slack: 1.6,  // a flick may briefly stretch the twist to limit*slack, so the body LAGS
+  },
+  stepBodyYaw(body, head, dt, moveYaw) {
+    if (body == null || !isFinite(body)) return head;
+    const T = this.bodyTurn, D = Math.PI / 180;
+    const wrap = (a) => { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; };
+    const lim = Math.max(0, T.limit) * D;
+    // Walking turns the body toward the way you're going — but only as far as the limit lets
+    // it, or a permanent sideways strafe would park the body out at the hard clamp for ever
+    // (the walk term and the ease below just fight each other and settle wherever they cross).
+    if (moveYaw != null) {
+      const want = head + clamp(wrap(moveYaw - head), -lim, lim);
+      body = wrap(body + wrap(want - body) * Math.min(1, dt * T.walk));
+    }
+    // Never past what headYawLocal will draw (it clamps the head bone at 1.2 rad) — beyond
+    // that the head visually stops following while the twist keeps growing, which looks broken.
+    const hard = Math.min(lim * Math.max(1, T.slack), 1.15);
+    let d = wrap(head - body);
+    if (Math.abs(d) > lim) {
+      // Eased, not pinned. Applying the limit as a hard clamp every frame makes the body
+      // teleport the instant you flick the view — the ease has to be allowed to overshoot the
+      // resting limit (up to `hard`) or the clamp simply cancels it out.
+      const target = head - Math.sign(d) * lim;
+      body = wrap(body + wrap(target - body) * Math.min(1, dt * T.ease));
+      d = wrap(head - body);
+      if (Math.abs(d) > hard) body = wrap(head - Math.sign(d) * hard);
+    }
+    return wrap(body);
   },
   // ---- live block-edit sync (phase 3) ----
   // Player actions (place/break/interact) are wrapped in mpBeginEdit/mpEndEdit; every
@@ -15287,9 +15477,47 @@ const Game = {
     this.mpCapturing = null;
     if (cap && cap.length && Net.connected) Net.send('blocks', { dim: this.world.dim, edits: cap });
   },
+  // ---- host: world-driven block changes ----
+  // mpBeginEdit/mpEndEdit only ever wrapped a PLAYER action, so everything the world does on
+  // its own — an explosion's crater, leaf decay, fluid spreading, fire, redstone, crops —
+  // reached nobody. A guest was then standing in terrain the host had already blown away,
+  // which is what "bloky nejsou synchronizovane, vidim kamose litat" was. The host now queues
+  // every setBlock that ISN'T inside an open capture and flushes the lot at 20Hz.
+  mpQueueAmbient(world, x, y, z, id, data) {
+    if (this.mpRole !== 'host' || this.mpApplyingRemote || !Net.connected) return;
+    if (world !== this.world) return; // the `blocks` protocol is same-dimension only
+    (this.mpAmbient || (this.mpAmbient = [])).push([x, y, z, id, data]);
+  },
+  mpFlushAmbient(dt) {
+    if (this.mpRole !== 'host' || !Net.connected) return;
+    this.mpAmbientTimer += dt;
+    if (this.mpAmbientTimer < 0.05) return; // 20 Hz — one message per burst, not per block
+    this.mpAmbientTimer = 0;
+    const q = this.mpAmbient;
+    if (!q || !q.length) return;
+    this.mpAmbient = null;
+    // a single TNT chain can be a few hundred blocks; chunk it so one frame can't approach
+    // the relay's 4MB cap, and so a huge burst doesn't arrive as one stall on the guest
+    for (let i = 0; i < q.length; i += 2000) {
+      Net.send('blocks', { dim: this.world.dim, edits: q.slice(i, i + 2000) });
+    }
+  },
   onRemoteBlocks(m) {
     if (!this.world || !m.edits) return;
     if (m.dim && m.dim !== this.world.dim) return; // only sync the shared (current) dimension for now
+    // Applying someone else's edit must not go back out as one of ours: the relay already
+    // broadcast it to every other peer, so echoing it would apply it twice everywhere.
+    // Only the DIRECT application is suppressed — the cascade it schedules (leaf decay,
+    // fluid, redstone) fires on a later tick and is very much ours to broadcast.
+    const wasApplying = this.mpApplyingRemote;
+    this.mpApplyingRemote = true;
+    try {
+      this.applyRemoteBlocks(m);
+    } finally {
+      this.mpApplyingRemote = wasApplying;
+    }
+  },
+  applyRemoteBlocks(m) {
     for (const e of m.edits) {
       // A guest that breaks a chest deliberately does NOT spill it (their copy may be
       // stale — that's how items used to get duplicated). We own the real contents,
@@ -15552,6 +15780,13 @@ const Game = {
   onRemoteGive(m) {
     if (!this.player || !m.id) return;
     const st = { id: m.id, n: m.n || 1 }; if (m.dur != null) st.dur = m.dur;
+    // Belt and braces for the death case: a stack the host collected for us before it saw
+    // our 'dead' flag must not land in the inventory we respawn with. Put it back on the
+    // ground at the corpse instead of binning it, so a race can never eat someone's gear.
+    if (this.player.deadFlag) {
+      this.mpDropRequest(this.player.x, this.player.y + 0.5, this.player.z, st, true);
+      return;
+    }
     const left = this.player.inventory.add(st);
     Sfx.play('pop', { pitch: 0.8 + Math.random() * 0.6 });
     if (left > 0 && this.player) { st.n = left; this.mpDropRequest(this.player.x, this.player.y + 0.5, this.player.z, st, true); }
@@ -15727,7 +15962,7 @@ const Game = {
     if (this.mpRole !== 'host' || !this.remotes.size || this.state !== 'play') return null;
     let best = null, bestD = 1e9;
     for (const r of this.remotes.values()) {
-      if (!r.seen) continue;
+      if (!r.seen || r.dead) continue;   // nothing chases a corpse
       const d = (r.dispX - x) * (r.dispX - x) + (r.dispZ - z) * (r.dispZ - z);
       if (d < bestD) { bestD = d; best = r; }
     }
@@ -15748,6 +15983,7 @@ const Game = {
       this._remoteProxies.set(r.pid, px);
     }
     px.x = r.dispX; px.y = r.dispY; px.z = r.dispZ; px.yaw = r.yaw; px.pitch = r.pitch;
+    px.deadFlag = !!r.dead;
     return px;
   },
   // Try to melee another player (called from player.attackPress when no mob was hit).
@@ -15757,7 +15993,7 @@ const Game = {
     const eye = p.eyePos();
     let target = null, bestT = 3.2;
     for (const r of this.remotes.values()) {
-      if (!r.seen) continue;
+      if (!r.seen || r.dead) continue;
       const bb = [r.dispX - 0.4, r.dispY - 0.1, r.dispZ - 0.4, r.dispX + 0.4, r.dispY + 1.9, r.dispZ + 0.4];
       const hit = rayBox(eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], bb);
       if (!hit || hit.t > bestT) continue;
@@ -15796,7 +16032,16 @@ const Game = {
       x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
       yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3),
       held: held ? held.id : null, mine, sn: p.sneaking ? 1 : 0,
+      dd: p.deadFlag ? 1 : 0,
     });
+  },
+  // Push our state out THIS INSTANT instead of waiting for the next 15Hz tick. Called
+  // either side of a death, so the host learns we're dead before the drops we're about
+  // to request arrive (a socket delivers in order, so the flag can't lose the race).
+  mpSendPosNow() {
+    if (!Net.connected || !this.player) return;
+    this.mpPosTimer = 99;
+    this.sendMyPos(0);
   },
   // typing on a sign (desktop). Mobile goes through Mobile.openKeyboard('sign') instead.
   signKey(e) {
@@ -16240,7 +16485,12 @@ const Game = {
       const w = this.dims[dim], d = save.dims[dim];
       if (!d) continue;
       w.edits = new Map(d.edits);
-      for (const be of d.be) w.blockEntities.set(be.x + ',' + be.y + ',' + be.z, be);
+      for (const be of d.be) {
+        // a chest saved before an item id was retired still holds it — repair it here or
+        // the first shift-click out of that chest hands the player an id nothing knows
+        if (Array.isArray(be.items)) be.items = fixStacks(be.items, be.items.length);
+        w.blockEntities.set(be.x + ',' + be.y + ',' + be.z, be);
+      }
       w.spawnedChunks = new Set(d.spawned || []);
       loadEntities(w, d.ents);
     }
@@ -16249,7 +16499,7 @@ const Game = {
     p.x = sp.x; p.y = sp.y; p.z = sp.z; p.yaw = sp.yaw; p.pitch = sp.pitch;
     p.hp = sp.hp; p.hunger = sp.hunger; p.saturation = sp.sat;
     p.xp = sp.xp; p.xpLevel = sp.lvl; p.xpProgress = sp.prog;
-    p.inventory.slots = sp.inv; p.inventory.armor = sp.armor; p.selected = sp.sel;
+    p.inventory.slots = fixStacks(sp.inv, 36); p.inventory.armor = fixStacks(sp.armor, 4); p.selected = sp.sel;
     p.spawnX = sp.spawn[0]; p.spawnY = sp.spawn[1]; p.spawnZ = sp.spawn[2];
     p.bedSpawn = sp.bed;
     p.fallStart = p.y;
@@ -16577,7 +16827,12 @@ const Game = {
       p.update(dt, this);
       updateEntities(w, dt, this);
       this.updateRemotes(dt);
+      // our own body lags our look the same way, for third person (F4)
+      this.selfBodyYaw = this.stepBodyYaw(
+        this.selfBodyYaw, p.yaw, dt,
+        Math.hypot(p.vx, p.vz) > 0.35 ? Math.atan2(p.vx, -p.vz) : null);
       this.sendMyPos(dt);
+      this.mpFlushAmbient(dt);
       this.mpBroadcastDrops(dt);
       this.mpTickContainers(dt);
       this.mpTickContainerWait(dt);
@@ -16636,13 +16891,14 @@ const Game = {
     Renderer.updateChunkMeshes(w, p.x, p.z, rd);
   },
   drawRemotePlayers(w) {
-    for (const r of this.remotes.values()) if (r.seen) this.drawRemotePlayer(w, r);
+    for (const r of this.remotes.values()) if (r.seen && !r.dead) this.drawRemotePlayer(w, r);
   },
   drawRemotePlayer(w, r) {
     const modelName = (r.hasSkin && r.slot != null) ? 'steve_remote' + r.slot : 'steve';
     this.drawPlayerFigure(w, {
       type: modelName, model: modelName, x: r.dispX, y: r.dispY, z: r.dispZ, h: 1.8, w: 0.6,
-      yaw: r.yaw, headYaw: r.yaw, headPitch: r.pitch, walkT: r.walkT, walkAmp: r.walkAmp, age: r.age,
+      yaw: r.bodyYaw != null ? r.bodyYaw : r.yaw, headYaw: r.yaw,
+      headPitch: r.pitch, walkT: r.walkT, walkAmp: r.walkAmp, age: r.age,
       swing: r.swing == null ? 1 : r.swing, sneak: r.sn ? 1 : 0,
     }, r.held);
   },
@@ -16785,9 +17041,10 @@ const Game = {
     const held = p.heldItem();
     this.drawPlayerFigure(w, {
       type: modelName, model: modelName, x: p.x, y: p.y, z: p.z, h: 1.8, w: 0.6,
-      yaw: p.yaw, headYaw: p.yaw, headPitch: p.pitch,
-      // bobT/bobAmp already track walking distance & speed, so they drive the legs
-      walkT: p.bobT, walkAmp: p.bobAmp, age: 0,
+      yaw: this.selfBodyYaw != null ? this.selfBodyYaw : p.yaw, headYaw: p.yaw, headPitch: p.pitch,
+      // bobT tracks distance walked; limbAmp (NOT bobAmp) is the limb swing — bobAmp is the
+      // camera's and is killed the instant you leave the ground, which froze the model mid-jump
+      walkT: p.bobT, walkAmp: p.limbAmp, age: 0,
       swing: p.swing, sneak: p.sneaking ? 1 : 0,
     }, held ? held.id : null);
   },
