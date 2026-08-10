@@ -10566,7 +10566,12 @@ function updateEntities(world, dt, game) {
     if (e.puppet) {
       e.age += dt;
       const ox = e.x, oz = e.z;
-      const k = Math.min(1, dt * 12);
+      // Glide so we ARRIVE at the streamed target just as the next one is due, using the
+      // interval this particular entity is actually being updated at (`tstep`, measured on
+      // arrival). The old fixed rate raced to the target in ~83 ms and then sat still for
+      // the rest of the snapshot, which is the stutter you saw on anything that updates
+      // slowly — and it is what lets the host stream distant mobs less often for free.
+      const k = Math.min(1, dt / Math.max(0.05, e.tstep || 0.143));
       e.x += (e.tx - e.x) * k; e.y += (e.ty - e.y) * k; e.z += (e.tz - e.z) * k;
       // mob puppets: decay hurt flash, drive the death animation, follow orientation
       if (e.hurtT > 0) e.hurtT -= dt;
@@ -13555,7 +13560,15 @@ const UI = {
     this.slider('sound', bx + 160, H * 0.25, 150, 'Sound: ' + Math.round(o.sound * 100) + '%', o.sound);
     this.slider('sens', bx, H * 0.25 + 26, 150, 'Sensitivity: ' + Math.round(o.sens * 200) + '%', o.sens);
     this.slider('fov', bx + 160, H * 0.25 + 26, 150, 'FOV: ' + Math.round(60 + o.fov * 50), o.fov);
-    this.slider('render', bx, H * 0.25 + 52, 150, 'Render Distance: ' + (4 + Math.round(o.render * 8)) + ' chunks', o.render);
+    // The slider always shows what THIS player chose — a host's cap never rewrites it
+    // (vanilla server behaviour). It only says so when the cap is actually biting.
+    // Labels are kept no longer than the uncapped one: the slider is 150 wide and the
+    // View Bobbing button sits 10px to its right, so a longer string would run into it.
+    const rdOwn = game.ownRenderDist;
+    let rdLabel = 'Render Distance: ' + rdOwn + ' chunks';
+    if (game.isGuest && game.mpRDCap && game.mpRDCap < rdOwn) rdLabel = 'Render Dist: ' + rdOwn + ' (host ' + game.mpRDCap + ')';
+    else if (game.mpRole === 'host' && Net.connected) rdLabel = 'Render Dist: ' + rdOwn + ' (room cap)';
+    this.slider('render', bx, H * 0.25 + 52, 150, rdLabel, o.render);
     this.button('bob', bx + 160, H * 0.25 + 52, 150, 'View Bobbing: ' + (o.bob ? 'ON' : 'OFF'));
     // touch controls row
     const tOn = typeof Mobile !== 'undefined' && Mobile.enabled;
@@ -14862,12 +14875,25 @@ const MP_ENT_MIN_RADIUS = 32;
 // Entities already being tracked stay in the list until they pass radius * this, so a mob
 // wandering across the boundary can't be created and destroyed on alternate snapshots.
 const MP_ENT_HYSTERESIS = 1.15;
+// How often a mob is re-sent, by how far away the recipient is standing. A cow 90 blocks off
+// is a few pixels tall and moves well under one of them between snapshots, so streaming it
+// at the same rate as the one at your elbow is paying full price for nothing — and most of
+// a view radius is, by area, "far away" (inside 32 blocks is 6% of a 128-block circle).
+// The guest glides each puppet over the interval it is actually being updated at, so a
+// slower tier reads as the same smooth walk, not as stutter. Fast-moving things (arrows,
+// fireballs, TNT) are never slowed — you notice those.
+const MP_ENT_NEAR = 32, MP_ENT_MID = 72;
+const MP_ENT_MID_EVERY = 2, MP_ENT_FAR_EVERY = 3;
 // How far around each OTHER player the host keeps the world generated and simulated. This is
 // physics, not a view — 2 chunks each way is 80x80 blocks, plenty for breaking blocks, drops
 // and the mobs at your elbow, without the host paying a full render distance per guest
 // (chunks are ~96 KB each and this game never unloads them).
 const MP_GUEST_SIM_CHUNKS = 2;
 const MP_GUEST_CHUNK_BUDGET = 2;   // chunks generated per frame across all guests
+// Wire-protocol generation, announced in `hello`. 2 = entity/drop frames are deltas rather
+// than a full snapshot every time. A peer that doesn't announce one is assumed to be 1 and
+// keeps getting the old format, so a friend on a stale cached bundle still sees the world.
+const MP_PROTO = 2;
 
 const Game = {
   state: 'title', // title|create|loading|play|dead|win
@@ -14896,10 +14922,15 @@ const Game = {
   selfBodyYaw: null, // third-person body yaw, lags p.yaw (see stepBodyYaw)
   mpDropSeq: 0, mpDropTimer: 0,
   mpEntSeq: 0, mpEntTimer: 0, _remoteProxies: new Map(), mpName: '',
-  // host: per-guest set of entity nids currently streamed to them, for the culling hysteresis
+  // host: per-guest Map(nid -> the last packed row we sent them). Doubles as the culling
+  // hysteresis set and as the baseline every delta frame is computed against.
   mpEntTracked: new Map(),
+  mpDropTracked: new Map(),   // same, for the ground-item channel (separate nid space)
+  _entResyncAt: 0,
   hasSkin: false, mySkinData: null, _skinInput: null, _skinInputRect: null,
   mpSlots: 4, // room size the host offers (total players, us included)
+  // guest: the host's render distance = the ceiling on ours (0 = not capped). See renderDist.
+  mpRDCap: 0, _sentRDCap: null,
   freeSkinSlots: null,
   mpEnvTimer: 0, sleeping: false,
   // host: per-player-name save data for everyone who ever joined this world, so a
@@ -14938,7 +14969,18 @@ const Game = {
     }
   },
 
-  get renderDist() { return 4 + Math.round(this.options.render * 8); },
+  // What the player asked for in Options: 4..12 chunks. This is what the slider shows,
+  // and it is never rewritten by anybody else.
+  get ownRenderDist() { return 4 + Math.round(this.options.render * 8); },
+  // What we actually draw. A guest never renders past the HOST's own render distance —
+  // the same rule as a vanilla server's view-distance. The guest's setting is left
+  // exactly as they chose it (they can sit on 12 all they like), they just don't get
+  // chunks or entity streams past the room's ceiling. The host is the one paying to
+  // stream every guest's surroundings, so the host is the one who gets to size it.
+  get renderDist() {
+    const own = this.ownRenderDist;
+    return (this.isGuest && this.mpRDCap && Net.connected) ? Math.min(own, this.mpRDCap) : own;
+  },
   get fov() { return 60 + this.options.fov * 50; },
 
   init() {
@@ -14980,6 +15022,8 @@ const Game = {
     else this.options[id] = v;
     Sfx.setVolumes(this.options.sound, this.options.music);
     try { localStorage.setItem('mcjs_options', JSON.stringify(this.options)); } catch (e) {}
+    // hosting? our render distance is the room's ceiling, so the guests need it live
+    if (id === 'render') this.mpBroadcastRDCap();
   },
 
   // ---------- input ----------
@@ -15076,8 +15120,20 @@ const Game = {
     Net.on('phit', (m) => this.onRemotePhit(m));        // anyone: another player hit me
     Net.on('hello', (m) => {
       const r = this.getRemote(m.from);
-      if (r) r.name = (m.name || '').slice(0, 16) || 'Player';
+      if (r) {
+        r.name = (m.name || '').slice(0, 16) || 'Player';
+        // no `mp` field = a build from before delta entity frames; keep sending them the
+        // old full-snapshot format rather than a stream they would silently ignore
+        r.proto = m.mp || 1;
+      }
       this.mpWorldForNamed(m.from, r ? r.name : null);
+    });
+    // guest lost track of a puppet → wipe our idea of what it knows so both streamed
+    // channels rebuild from a keyframe on their next tick
+    Net.on('entRs', (m) => {
+      if (this.mpRole !== 'host') return;
+      this.mpEntTracked.delete(m.from);
+      this.mpDropTracked.delete(m.from);
     });
     Net.on('pstate', (m) => this.onRemoteState(m));   // host: a guest's character, to persist by name
     Net.on('flush', () => this.mpFlushState());       // guest: host is closing, send your character NOW
@@ -15091,6 +15147,8 @@ const Game = {
     Net.on('chat', (m) => { const r = this.getRemote(m.from); UI.msg('<' + ((r && r.name) || 'Player') + '> ' + (m.text || '').slice(0, 200)); });
     Net.on('skin', (m) => { if (m.data) this.loadRemoteSkin(m.from, m.data); }); // another player's custom skin
     Net.on('env', (m) => this.onRemoteEnv(m));   // guest: host's authoritative time + weather
+    // guest: the host moved its render-distance slider — that's the room's ceiling
+    Net.on('rdcap', (m) => { if (m.from === 0 && this.mpRole !== 'host') this.setRDCap(m.n); });
     Net.on('sleep', (m) => this.onRemoteSleep(m)); // another player got into / out of a bed
     Net.on('wake', (m) => this.onRemoteWake(m));   // host decided everyone slept → morning
     Net.on('closed', () => {
@@ -15123,6 +15181,7 @@ const Game = {
         tx: 0, ty: 0, tz: 0, dispX: 0, dispY: 0, dispZ: 0,
         yaw: 0, pitch: 0, walkT: 0, walkAmp: 0, age: 0, swing: 1,
         held: null, mine: null, sn: 0, sleeping: false, dead: false, bodyYaw: null,
+        proto: 1,   // raised to MP_PROTO when their `hello` says they speak delta frames
         hasSkin: false, slot: this.allocSkinSlot(),
       };
       this.remotes.set(pid, r);
@@ -15135,12 +15194,17 @@ const Game = {
     this.remotes.delete(pid);
     this._remoteProxies.delete(pid);
     this.mpEntTracked.delete(pid);
+    this.mpDropTracked.delete(pid);
     this.freeSkinSlot(r.slot);
   },
   clearRemotes() {
     for (const pid of Array.from(this.remotes.keys())) this.removeRemote(pid);
     this._remoteProxies.clear();
     this.mpEntTracked.clear();
+    this.mpDropTracked.clear();
+    this._posLast = null;
+    // out of the room = back to our own render distance, whatever the host imposed
+    this.mpRDCap = 0; this._sentRDCap = null;
   },
   allocSkinSlot() {
     if (!this.freeSkinSlots) {
@@ -15170,6 +15234,9 @@ const Game = {
     const pid = m.pid;
     this.mpSendHello(pid);
     this.mpSendSkin(pid);
+    // `pos` is a broadcast of differences against what we last said; somebody who just
+    // walked in has no such baseline, so the next one has to be a complete packet.
+    this._posLast = null;
     // The world snapshot carries that player's saved character, so we wait for their
     // `hello` (name) before sending it. Fallback timer covers an older client that
     // never introduces itself — it just gets a fresh character.
@@ -15217,6 +15284,7 @@ const Game = {
     const p = this.player, w = this.world;
     Net.send('world', {
       seed: this.seed, mode: this.mode, time: this.time, dim: w.dim,
+      rd: this.ownRenderDist,   // the room's render-distance ceiling (see setRDCap)
       hostPos: { x: p.x, y: p.y, z: p.z },
       pdata: (name != null ? this.guestData[this.mpDataKey(name)] : null) || null,
       dims: {
@@ -15278,7 +15346,7 @@ const Game = {
     this.guestData[this.mpDataKey(r && r.name)] = m.d;
   },
   // `to` omitted = tell the whole room; `to` set = only the peer that just joined
-  mpSendHello(to) { Net.send('hello', { name: this.mpMyName() }, to); },
+  mpSendHello(to) { Net.send('hello', { name: this.mpMyName(), mp: MP_PROTO }, to); },
   // broadcast a chat line to every other player in the room (routed via relay, not the host)
   mpSendChat(text) { if (Net.connected) Net.send('chat', { text: String(text).slice(0, 200) }); },
   // ---- custom skin (phase 4e) ----
@@ -15381,11 +15449,12 @@ const Game = {
     this.mpEnvTimer += dt;
     if (this.mpEnvTimer < 1.5) return;
     this.mpEnvTimer = 0;
-    Net.send('env', { time: Math.round(this.time), w: Weather.state, wt: Math.round(Weather.timer) });
+    Net.send('env', { time: Math.round(this.time), w: Weather.state, wt: Math.round(Weather.timer), rd: this.ownRenderDist });
   },
   onRemoteEnv(m) {
     if (this.mpRole === 'host' || m.from !== 0) return; // only the host owns the clock
     if (m.time != null) this.time = m.time;
+    if (m.rd != null) this.setRDCap(m.rd);   // heartbeat copy of the render-distance ceiling
     if (m.w && m.w !== Weather.state) Weather.set(m.w, m.wt);
     else if (m.wt != null) Weather.timer = m.wt;
   },
@@ -15440,6 +15509,8 @@ const Game = {
     this.isGuest = true; this.mpRole = 'guest';
     this.mpSendHello();
     this.mpSendSkin();
+    // before anything is generated or reported: the host's render distance caps ours
+    this.setRDCap(m.rd);
     this.mpSendViewRadius(true);   // tell the host how far to stream entities to us
     this.currentWorldId = 0;
     const hp = m.hostPos || { x: 8, y: 70, z: 8 };
@@ -15479,6 +15550,22 @@ const Game = {
   onRemotePos(m) {
     const r = this.getRemote(m.from);
     if (!r) return;
+    if (m.v === 2) {
+      // packed form: fixed-point ints, and only the fields that changed are present
+      if (m.x != null) r.tx = m.x / MP_POS_SCALE;
+      if (m.y != null) r.ty = m.y / MP_POS_SCALE;
+      if (m.z != null) r.tz = m.z / MP_POS_SCALE;
+      if (m.r != null) r.yaw = m.r / MP_ANG_SCALE;
+      if (m.t != null) r.pitch = m.t / MP_ANG_SCALE;
+      if (m.hd != null) r.held = m.hd || null;
+      if (m.mn != null) r.mine = m.mn || null;
+      if (m.fl != null) { r.sn = (m.fl & 1) ? 1 : 0; r.dead = !!(m.fl & 2); }
+      // Only a packet carrying a full position may promote us to `seen` — that flag turns
+      // on entity culling, mob targeting and PvP against this player, all of which would
+      // aim at (0,0) if a bare delta got there first.
+      if (!r.seen && m.q) { r.seen = true; r.dispX = r.tx; r.dispY = r.ty; r.dispZ = r.tz; }
+      return;
+    }
     r.tx = m.x; r.ty = m.y; r.tz = m.z; r.yaw = m.yaw || 0; r.pitch = m.pitch || 0;
     r.held = m.held != null ? m.held : null;
     r.mine = m.mine || null;
@@ -15887,42 +15974,83 @@ const Game = {
   },
   // Host: broadcast the authoritative list of ground items ~8 Hz so the guest can
   // render them. Each item gets a stable network id (nid) the first time it's sent.
+  // Row layout: [nid, itemId, count, x, y, z] with the positions as MP_POS_SCALE integers.
+  // Mask bits for an update: 1 = count, 2/4/8 = x/y/z (as deltas), 16 = item id (only ever
+  // moves when two stacks merge into one nid, but it costs one bit to be safe).
+  mpDropDiffRow(cur, prev) {
+    let mask = 0; const vals = [];
+    if (cur[2] !== prev[2]) { mask |= 1; vals.push(cur[2]); }
+    if (cur[3] !== prev[3]) { mask |= 2; vals.push(cur[3] - prev[3]); }
+    if (cur[4] !== prev[4]) { mask |= 4; vals.push(cur[4] - prev[4]); }
+    if (cur[5] !== prev[5]) { mask |= 8; vals.push(cur[5] - prev[5]); }
+    if (cur[1] !== prev[1]) { mask |= 16; vals.push(cur[1]); }
+    if (!mask) return null;
+    return [cur[0], mask].concat(vals);
+  },
+  // Host: stream the authoritative list of ground items. Was "every item in the world, to
+  // everybody, 8 times a second, with the item's NAME spelled out in every row" — a floor
+  // covered in loot after a mob fight measured 1.9 KB a frame. Now it is culled to what each
+  // player could see and only mentions an item on the frame it actually changes, so a pile
+  // of settled drops costs nothing at all.
   mpBroadcastDrops(dt) {
     if (this.mpRole !== 'host' || !Net.connected || !this.world) return;
     this.mpDropTimer += dt;
     if (this.mpDropTimer < 0.125) return;
     this.mpDropTimer = 0;
-    const list = [];
+    const rows = [];
     for (const e of this.world.entities) {
       if (e.dead || e.type !== 'item' || !e.stack) continue;
       if (e.nid == null) e.nid = ++this.mpDropSeq;
-      list.push([e.nid, e.stack.id, e.stack.n, +e.x.toFixed(2), +e.y.toFixed(2), +e.z.toFixed(2)]);
+      rows.push({ nid: e.nid, x: e.x, z: e.z, row: [
+        e.nid, e.stack.id, e.stack.n,
+        Math.round(e.x * MP_POS_SCALE), Math.round(e.y * MP_POS_SCALE), Math.round(e.z * MP_POS_SCALE),
+      ] });
     }
-    Net.send('drops', { list });
+    this.mpStreamRows('drops', rows, this.mpDropTracked, this.mpDropDiffRow,
+      (r) => [r[0], r[1], r[2], +(r[3] / MP_POS_SCALE).toFixed(2), +(r[4] / MP_POS_SCALE).toFixed(2), +(r[5] / MP_POS_SCALE).toFixed(2)]);
   },
   // Guest: reconcile our puppet item entities with the host's snapshot.
+  // Same a/u/r/k shape as `ents`; `list` is the pre-phase-8 format (unpacked floats).
   onRemoteDrops(m) {
-    if (this.mpRole === 'host' || m.from !== 0 || !this.world || !m.list) return;
-    const w = this.world, seen = new Set();
+    if (this.mpRole === 'host' || m.from !== 0 || !this.world) return;
+    const w = this.world;
     // index existing item puppets by nid (mob/projectile puppets have their own nid
     // space on the 'ents' channel, so only reconcile the ones carrying a stack)
     const byNid = new Map();
     for (const e of w.entities) if (e.puppet && e.stack && e.nid != null) byNid.set(e.nid, e);
-    for (const row of m.list) {
-      const nid = row[0], id = row[1], n = row[2], x = row[3], y = row[4], z = row[5];
-      seen.add(nid);
+    const legacy = !!m.list, adds = m.list || m.a;
+    const seen = (legacy || m.k) ? new Set() : null;
+    if (adds) for (const row of adds) {
+      const nid = row[0], id = row[1], n = row[2];
+      const qx = legacy ? Math.round(row[3] * MP_POS_SCALE) : row[3];
+      const qy = legacy ? Math.round(row[4] * MP_POS_SCALE) : row[4];
+      const qz = legacy ? Math.round(row[5] * MP_POS_SCALE) : row[5];
+      const x = qx / MP_POS_SCALE, y = qy / MP_POS_SCALE, z = qz / MP_POS_SCALE;
+      if (seen) seen.add(nid);
       let e = byNid.get(nid);
       if (!e) {
         e = new ItemEntity(w, x, y, z, { id, n }, false);
         e.puppet = true; e.nid = nid; e.pickupDelay = 1e9; // never self-picks up
-        e.tx = x; e.ty = y; e.tz = z;
-        w.entities.push(e);
-      } else {
-        e.tx = x; e.ty = y; e.tz = z; e.stack.n = n; e.stack.id = id;
+        w.entities.push(e); byNid.set(nid, e);
       }
+      e.tx = x; e.ty = y; e.tz = z; e.stack.n = n; e.stack.id = id;
+      e.qx = qx; e.qy = qy; e.qz = qz;
+      this.mpNoteEntStep(e);
     }
+    if (m.u) for (const u of m.u) {
+      const e = byNid.get(u[0]);
+      if (!e) { this.mpRequestEntResync(); continue; }
+      const mask = u[1]; let i = 2;
+      if (mask & 1) e.stack.n = u[i++];
+      if (mask & 2) e.qx += u[i++];
+      if (mask & 4) e.qy += u[i++];
+      if (mask & 8) e.qz += u[i++];
+      if (mask & 14) { e.tx = e.qx / MP_POS_SCALE; e.ty = e.qy / MP_POS_SCALE; e.tz = e.qz / MP_POS_SCALE; this.mpNoteEntStep(e); }
+      if (mask & 16) e.stack.id = u[i++];
+    }
+    if (m.r) for (const nid of m.r) { const e = byNid.get(nid); if (e) e.remove(); }
     // drop puppets the host no longer reports (picked up / despawned)
-    for (const e of w.entities) if (e.puppet && e.stack && !seen.has(e.nid)) e.remove();
+    if (seen) for (const e of w.entities) if (e.puppet && e.stack && !seen.has(e.nid)) e.remove();
   },
   // ---- mob & projectile sync (phase 4c, host-authoritative) ----
   // Field layout of a packed 'ents' row, derived from the type string alone so BOTH sides
@@ -15986,6 +16114,64 @@ const Game = {
       t === 'falling_block' || t === 'pearl' || t === 'eye' ||
       t === 'blaze_fireball' || t === 'ghast_fireball');
   },
+  // ---- delta encoding of a snapshot (phase 8) ----
+  // A row only goes on the wire when something about it actually changed. Measured on a
+  // busy world: of 81 visible entities, 22 were byte-identical to the previous snapshot and
+  // the other 59 differed in 2.7 of their 10 fields — so a full row per entity per snapshot
+  // was paying ~10x for the information it carried.
+  //   mask bit 1/2/4  = x/y/z, sent as a DELTA against the last value this peer was given
+  //                     (a mob walking is ±10 quantised units: "7" instead of "181696")
+  //   8/16/32         = yaw / head yaw / head pitch, absolute (they wrap, and quantised they
+  //                     are only ever 3-4 characters anyway)
+  //   64              = the flags byte
+  //   128             = the per-type tail (see mpEntExtras) — resent whole, it is small and
+  //                     rarely changes, so a bit each would cost more than it saves
+  // Returns null when the entity is unchanged, i.e. it is not mentioned in the frame at all.
+  mpEntDiffRow(cur, prev) {
+    let mask = 0; const vals = [];
+    if (cur[2] !== prev[2]) { mask |= 1; vals.push(cur[2] - prev[2]); }
+    if (cur[3] !== prev[3]) { mask |= 2; vals.push(cur[3] - prev[3]); }
+    if (cur[4] !== prev[4]) { mask |= 4; vals.push(cur[4] - prev[4]); }
+    if (cur[5] !== prev[5]) { mask |= 8; vals.push(cur[5]); }
+    if (cur[6] !== prev[6]) { mask |= 16; vals.push(cur[6]); }
+    if (cur[7] !== prev[7]) { mask |= 32; vals.push(cur[7]); }
+    if (cur[8] !== prev[8]) { mask |= 64; vals.push(cur[8]); }
+    let tail = false;
+    for (let i = 9; i < cur.length; i++) if (cur[i] !== prev[i]) { tail = true; break; }
+    if (tail) { mask |= 128; for (let i = 9; i < cur.length; i++) vals.push(cur[i]); }
+    if (!mask) return null;
+    return [cur[0], mask].concat(vals);
+  },
+  // Build one frame for one recipient. `list` is [{nid,row}] of what they may see, `base` is
+  // the Map of what they were last told (null = they know nothing, so send a keyframe).
+  // The returned `base` is always a FRESH Map, which is what keeps the broadcast path safe:
+  // peers that shared a baseline object keep sharing the new one, and a peer that gets its
+  // own targeted frame silently stops sharing.
+  mpDeltaFrame(list, base, diff) {
+    const next = new Map(), a = [], u = [];
+    for (const it of list) {
+      const prev = base && base.get(it.nid);
+      // "hold" = due to be skipped this tick (see the rate tiers in mpStreamRows). Keeping
+      // the OLD row as the baseline is what makes that free: no diff is emitted, and the
+      // entity still counts as known so it isn't listed as removed. Something the peer has
+      // never seen is always sent, whatever the tier says.
+      if (it.hold && prev) { next.set(it.nid, prev); continue; }
+      next.set(it.nid, it.row);
+      if (!prev) { a.push(it.row); continue; }
+      const d = diff.call(this, it.row, prev);
+      if (d) u.push(d);
+    }
+    const payload = {};
+    if (a.length) payload.a = a;
+    if (u.length) payload.u = u;
+    if (!base) payload.k = 1;   // keyframe: drop anything not listed in `a`
+    else {
+      const gone = [];
+      for (const nid of base.keys()) if (!next.has(nid)) gone.push(nid);
+      if (gone.length) payload.r = gone;
+    }
+    return { payload, base: next, empty: !a.length && !u.length && !payload.r && !payload.k };
+  },
   mpBroadcastEnts(dt) {
     if (this.mpRole !== 'host' || !Net.connected || !this.world) return;
     this.mpEntTimer += dt;
@@ -16011,31 +16197,54 @@ const Game = {
         Math.round((e.headPitch || 0) * MP_ANG_SCALE), f,
       ];
       for (const k of this.mpEntExtras(e.type)) row.push(this.mpEntExtraValue(e, k));
-      rows.push({ nid: e.nid, x: e.x, z: e.z, row });
+      // anything that isn't a walking mob (arrows, fireballs, pearls, primed TNT, falling
+      // blocks) keeps full-rate updates however far away it is — they move fast enough that
+      // a skipped snapshot is a visible jump
+      rows.push({ nid: e.nid, x: e.x, z: e.z, row, fast: !MOB_MODELS[e.type] });
     }
-    const per = [];
+    this.mpStreamRows('ents', rows, this.mpEntTracked, this.mpEntDiffRow);
+  },
+  // Cull `rows` per recipient, delta them against what that recipient already has, and put
+  // them on the wire. Both streamed channels (mobs/projectiles and ground items) do exactly
+  // this dance, so they share it — `tracked` is the per-peer baseline store, `diff` the
+  // field differ for that channel's row layout, `legacyRow` converts a packed row back to
+  // whatever a pre-phase-8 client expects (identity for `ents`, which was already packed).
+  mpStreamRows(type, rows, tracked, diff, legacyRow) {
+    const per = [], legacy = [];
     for (const r of this.remotes.values()) {
       // Nothing has arrived from this peer yet, so we don't know where it is — culling on a
       // (0,0) position would send it the wrong corner of the world. Send the lot until its
       // first `pos`; that's at most a fraction of a second.
       const rad = r.seen ? (r.viewR || MP_ENT_MAX_RADIUS) : MP_ENT_MAX_RADIUS;
       const inR = rad * rad, outR = rad * rad * MP_ENT_HYSTERESIS * MP_ENT_HYSTERESIS;
-      const was = this.mpEntTracked.get(r.pid);
-      const now = new Set();
-      const list = [];
+      const was = tracked.get(r.pid);
+      const tick = r.entTick = (r.entTick || 0) + 1;
+      const vis = [];
       for (const it of rows) {
-        let keep;
+        let keep, hold = false;
         if (!r.seen) keep = true;
         else {
           const dx = it.x - r.dispX, dz = it.z - r.dispZ, d2 = dx * dx + dz * dz;
           // already tracked → hold on until it's clearly out, so the boundary can't flicker
           keep = d2 <= inR || (was && was.has(it.nid) && d2 <= outR);
+          // far enough away to be worth updating less often? `hold` keeps it in the peer's
+          // baseline (so it is neither re-sent nor reported as gone) and skips the diff.
+          if (keep && !it.fast) {
+            const every = d2 > MP_ENT_MID * MP_ENT_MID ? MP_ENT_FAR_EVERY
+              : d2 > MP_ENT_NEAR * MP_ENT_NEAR ? MP_ENT_MID_EVERY : 1;
+            if (every > 1 && (tick + it.nid) % every !== 0) hold = true;
+          }
         }
         if (!keep) continue;
-        now.add(it.nid);
-        list.push(it.row);
+        vis.push(hold ? { nid: it.nid, x: it.x, z: it.z, row: it.row, hold: true } : it);
       }
-      per.push({ pid: r.pid, list, nids: now });
+      (r.proto >= 2 ? per : legacy).push({ pid: r.pid, vis });
+    }
+    // A peer on a pre-delta build still gets the whole visible world every snapshot; it
+    // would make nothing of `a`/`u`/`r`. Costs us only what it cost before.
+    for (const p of legacy) {
+      tracked.set(p.pid, new Map(p.vis.map(it => [it.nid, it.row])));
+      Net.send(type, { list: p.vis.map(it => (legacyRow ? legacyRow(it.row) : it.row)) }, p.pid);
     }
     if (!per.length) return;
     // Which is cheaper for the relay? A targeted list is paid for TWICE (our uplink, then the
@@ -16045,44 +16254,118 @@ const Game = {
     // world, and N targeted copies would cost more than the single broadcast we replaced.
     // Row counts stand in for bytes here; they're proportional enough to pick the winner.
     let targeted = 0;
-    for (const p of per) targeted += p.list.length;
+    for (const p of per) targeted += p.vis.length;
     targeted *= 2;
     const broadcast = rows.length * (1 + per.length);
     if (per.length >= 2 && targeted >= broadcast) {
-      const all = rows.map(it => it.row), allNids = new Set(rows.map(it => it.nid));
-      for (const p of per) this.mpEntTracked.set(p.pid, allNids);
-      Net.send('ents', { list: all });
+      // One frame for the whole room. Delta-ing it is only sound while every recipient is
+      // sitting on the very same baseline — which is exactly the case when the previous
+      // frame was also a broadcast, because they were all handed the identical Map object.
+      // Anything else (a peer just joined, we were targeting last frame) → keyframe.
+      let base = tracked.get(per[0].pid) || null;
+      for (const p of per) if (tracked.get(p.pid) !== base) { base = null; break; }
+      const f = this.mpDeltaFrame(rows, base, diff);
+      for (const p of per) tracked.set(p.pid, f.base);
+      if (!f.empty) Net.send(type, f.payload);
       return;
     }
     for (const p of per) {
-      this.mpEntTracked.set(p.pid, p.nids);
-      Net.send('ents', { list: p.list }, p.pid);
+      const f = this.mpDeltaFrame(p.vis, tracked.get(p.pid) || null, diff);
+      tracked.set(p.pid, f.base);
+      // a world where nothing moved costs literally nothing now
+      if (!f.empty) Net.send(type, f.payload, p.pid);
     }
   },
-  // Guest: reconcile our puppet mobs/projectiles with the host's snapshot.
-  onRemoteEnts(m) {
-    if (this.mpRole === 'host' || m.from !== 0 || !this.world || !m.list) return;
-    const w = this.world, seen = new Set();
-    const byNid = new Map();
-    for (const e of w.entities) if (e.puppet && !e.stack && e.nid != null) byNid.set(e.nid, e);
-    for (const raw of m.list) {
-      const row = this.mpUnpackEntRow(raw);
-      seen.add(row.n);
-      let e = byNid.get(row.n);
-      if (!e) { e = this.mpMakePuppet(row); if (!e) continue; w.entities.push(e); }
-      e.tx = row.x; e.ty = row.y; e.tz = row.z;
-      e.tyaw = row.r; e.thyaw = row.hy; e.thpitch = row.hp;
+  // Copy a decoded row (or the subset of one carried by an update) onto a puppet. Every
+  // field is guarded, so this serves both the full-row and the partial-update path.
+  mpApplyEntFields(e, row) {
+    if (row.x != null) { e.tx = row.x; e.ty = row.y; e.tz = row.z; }
+    if (row.r != null) e.tyaw = row.r;
+    if (row.hy != null) e.thyaw = row.hy;
+    if (row.hp != null) e.thpitch = row.hp;
+    if (row.f != null) {
       e.hurtT = (row.f & 1) ? Math.max(e.hurtT || 0, 0.4) : (e.hurtT || 0);
       e.puppetDying = !!(row.f & 2);
       e.onGround = !!(row.f & 4);
-      if (row.h != null) { e.hp = row.h; e.maxHp = row.mx; }
-      if (row.wm != null && MOB_MODELS[row.wm]) { e.model = row.wm; e.sitting = !!row.ws; e.tamed = !!row.wt; }
-      if (row.sq != null) e.squidTilt = row.sq;
-      if (row.fu != null) { if (e.type === 'creeper') e.fuseT = row.fu; else e.fuse = row.fu; }
-      if (row.vx != null) { e.tvx = row.vx; e.tvy = row.vy; e.tvz = row.vz; }
-      if (row.g != null) e.big = !!row.g;
     }
-    for (const e of w.entities) if (e.puppet && !e.stack && !seen.has(e.nid)) e.remove();
+    if (row.h != null) { e.hp = row.h; e.maxHp = row.mx; }
+    if (row.wm != null && MOB_MODELS[row.wm]) { e.model = row.wm; e.sitting = !!row.ws; e.tamed = !!row.wt; }
+    if (row.sq != null) e.squidTilt = row.sq;
+    if (row.fu != null) { if (e.type === 'creeper') e.fuseT = row.fu; else e.fuse = row.fu; }
+    if (row.vx != null) { e.tvx = row.vx; e.tvy = row.vy; e.tvz = row.vz; }
+    if (row.g != null) e.big = !!row.g;
+  },
+  // Apply one [nid, mask, ...vals] update row. Position values are deltas against the last
+  // QUANTISED value we were given (e.qx/qy/qz), never against the smoothed render position —
+  // that is what keeps the reconstruction exact rather than drifting.
+  // How long it has been since this puppet last got a new target. updateEntities glides over
+  // exactly this interval, so an entity the host streams less often (a distant mob) still
+  // moves smoothly instead of hopping and waiting.
+  mpNoteEntStep(e) {
+    const now = performance.now() / 1000;
+    if (e._tArr) e.tstep = clamp(now - e._tArr, 0.05, 0.5);
+    e._tArr = now;
+  },
+  mpApplyEntUpdate(e, u) {
+    const mask = u[1]; let i = 2;
+    if (mask & 1) e.qx += u[i++];
+    if (mask & 2) e.qy += u[i++];
+    if (mask & 4) e.qz += u[i++];
+    if (mask & 7) { e.tx = e.qx / MP_POS_SCALE; e.ty = e.qy / MP_POS_SCALE; e.tz = e.qz / MP_POS_SCALE; this.mpNoteEntStep(e); }
+    if (mask & 8) e.tyaw = u[i++] / MP_ANG_SCALE;
+    if (mask & 16) e.thyaw = u[i++] / MP_ANG_SCALE;
+    if (mask & 32) e.thpitch = u[i++] / MP_ANG_SCALE;
+    if (mask & 64) {
+      const f = u[i++];
+      e.hurtT = (f & 1) ? Math.max(e.hurtT || 0, 0.4) : (e.hurtT || 0);
+      e.puppetDying = !!(f & 2);
+      e.onGround = !!(f & 4);
+    }
+    if (mask & 128) {
+      const ex = this.mpEntExtras(e.type), o = {};
+      for (let k = 0; k < ex.length; k++) o[ex[k]] = u[i++];
+      this.mpApplyEntFields(e, o);
+    }
+  },
+  // Guest: reconcile our puppet mobs/projectiles with the host's snapshot.
+  //   a = full rows (new to us), u = deltas, r = gone, k = keyframe (prune everything else),
+  //   list = the pre-phase-8 format, still understood so an older host keeps working.
+  onRemoteEnts(m) {
+    if (this.mpRole === 'host' || m.from !== 0 || !this.world) return;
+    const w = this.world;
+    const byNid = new Map();
+    for (const e of w.entities) if (e.puppet && !e.stack && e.nid != null) byNid.set(e.nid, e);
+    const adds = m.list || m.a, keyframe = !!m.k || !!m.list;
+    const seen = keyframe ? new Set() : null;
+    if (adds) for (const raw of adds) {
+      const row = this.mpUnpackEntRow(raw);
+      if (seen) seen.add(row.n);
+      let e = byNid.get(row.n);
+      if (!e) { e = this.mpMakePuppet(row); if (!e) continue; w.entities.push(e); byNid.set(row.n, e); }
+      this.mpApplyEntFields(e, row);
+      this.mpNoteEntStep(e);
+      // remember the exact integers the host sent, so the next delta lands on the same value
+      if (Array.isArray(raw)) { e.qx = raw[2]; e.qy = raw[3]; e.qz = raw[4]; }
+      else { e.qx = Math.round(row.x * MP_POS_SCALE); e.qy = Math.round(row.y * MP_POS_SCALE); e.qz = Math.round(row.z * MP_POS_SCALE); }
+    }
+    if (m.u) for (const u of m.u) {
+      const e = byNid.get(u[0]);
+      // An update for a puppet we don't have means our baseline and the host's have drifted
+      // apart (should not happen — the socket is ordered and reliable — but if it ever does,
+      // silently missing mobs is the worst possible failure mode). Ask for a fresh keyframe.
+      if (!e) { this.mpRequestEntResync(); continue; }
+      this.mpApplyEntUpdate(e, u);
+    }
+    if (m.r) for (const nid of m.r) { const e = byNid.get(nid); if (e) e.remove(); }
+    if (seen) for (const e of w.entities) if (e.puppet && !e.stack && !seen.has(e.nid)) e.remove();
+  },
+  // Guest -> host: "forget what you think I know, send me everything again". Throttled so a
+  // burst of unknown nids in one frame can't turn into a burst of requests.
+  mpRequestEntResync() {
+    const now = performance.now();
+    if (now - this._entResyncAt < 1000) return;
+    this._entResyncAt = now;
+    Net.send('entRs', {}, 0);
   },
   mpMakePuppet(row) {
     const w = this.world; let e;
@@ -16139,6 +16422,34 @@ const Game = {
   // drawEntities refuses to draw an entity beyond 130 blocks no matter what.
   mpViewRadius() {
     return clamp(this.renderDist * 16, MP_ENT_MIN_RADIUS, MP_ENT_MAX_RADIUS);
+  },
+  // ---- render-distance ceiling (host -> guests) ----
+  // The host's own render distance caps everyone in the room. Three ways it travels,
+  // all landing in setRDCap: inside the world snapshot (so a joiner is capped before
+  // its first frame), as this immediate `rdcap` push when the slider moves, and as a
+  // field on the 1.5s `env` heartbeat so a dropped push can't leave a guest uncapped.
+  // setOption fires on every frame of a slider drag, hence the change check.
+  mpBroadcastRDCap(force) {
+    if (this.mpRole !== 'host' || !Net.connected) return;
+    const n = this.ownRenderDist;
+    if (!force && n === this._sentRDCap) return;
+    this._sentRDCap = n;
+    Net.send('rdcap', { n });
+  },
+  // guest side. Nothing to do beyond storing it: `renderDist` reads it, so the mesher
+  // frees the chunks past the new limit on its next pass, streamChunks stops generating
+  // them, the fog pulls in to match, and mpSendViewRadius re-reports our smaller radius
+  // so the host stops streaming entities we could never have drawn — the bandwidth win.
+  setRDCap(n) {
+    const cap = (typeof n === 'number' && n > 0) ? clamp(Math.round(n), 2, 32) : 0;
+    if (cap === this.mpRDCap) return;
+    const before = this.renderDist;
+    this.mpRDCap = cap;
+    const after = this.renderDist;
+    // only worth saying when it actually bites (a cap of 12 on someone playing at 6 is silent)
+    if (this.isGuest && after !== before && this.player && this.state === 'play')
+      UI.msg('Render distance ' + (after < before ? 'limited' : 'raised') + ' to ' + after +
+             ' chunks by the host', '#ffaa00');
   },
   // Cheap to call every frame: only actually sends when the player changes the slider.
   mpSendViewRadius(force) {
@@ -16233,22 +16544,71 @@ const Game = {
     this._lastSwingSend = now;
     Net.send('act', { a: 'swing' });
   },
+  // True while every player we know about speaks the packed protocol. `pos` is a broadcast,
+  // so it cannot be formatted per recipient — one peer on an old build and the whole room
+  // drops back to the old packet rather than watching that player stand frozen at spawn.
+  // Peers we have not heard a `hello` from yet count as old, which is the safe direction.
+  mpRoomAllProto2() {
+    if (this.remotes.size < Net.peers.length) return false;
+    for (const r of this.remotes.values()) if (!(r.proto >= 2)) return false;
+    return true;
+  },
   sendMyPos(dt) {
     if (!Net.connected || !this.player) return;
     this.mpPosTimer += dt;
     if (this.mpPosTimer < 0.066) return; // ~15 Hz
     this.mpPosTimer = 0;
+    if (!Net.peers.length) return;   // alone in the room: nobody to tell
     const p = this.player;
     const held = p.heldItem();
     // block the other player is currently mining → [x,y,z,stage 0-9] so they see cracks
     let mine = null;
     if (p.mining) mine = [p.mining.x, p.mining.y, p.mining.z, clamp(floor(p.mining.progress * 10), 0, 9)];
-    Net.send('pos', {
-      x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
-      yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3),
-      held: held ? held.id : null, mine, sn: p.sneaking ? 1 : 0,
-      dd: p.deadFlag ? 1 : 0,
-    });
+    if (!this.mpRoomAllProto2()) {
+      this._posLast = null;
+      Net.send('pos', {
+        x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
+        yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3),
+        held: held ? held.id : null, mine, sn: p.sneaking ? 1 : 0,
+        dd: p.deadFlag ? 1 : 0,
+      });
+      return;
+    }
+    // Packed + differential. Standing still used to cost 15 packets a second forever
+    // (~5 MB/hour/player); now it costs one keep-alive every 2 s. Values are the same
+    // fixed-point integers the entity stream uses — 3 cm and 1.4 degrees, i.e. vanilla's
+    // own wire precision, and the receiver smooths toward them anyway.
+    const cur = {
+      x: Math.round(p.x * MP_POS_SCALE), y: Math.round(p.y * MP_POS_SCALE), z: Math.round(p.z * MP_POS_SCALE),
+      r: Math.round(p.yaw * MP_ANG_SCALE), t: Math.round(p.pitch * MP_ANG_SCALE),
+      hd: held ? held.id : 0,
+      fl: (p.sneaking ? 1 : 0) | (p.deadFlag ? 2 : 0),
+      mk: mine ? mine.join(',') : '',
+    };
+    const now = performance.now();
+    const last = this._posLast;
+    const full = !last || now - (this._posFullAt || 0) > 2000;
+    const msg = { v: 2 };
+    if (full) {
+      this._posFullAt = now;
+      msg.q = 1;
+      msg.x = cur.x; msg.y = cur.y; msg.z = cur.z; msg.r = cur.r; msg.t = cur.t;
+      msg.hd = cur.hd; msg.fl = cur.fl; if (mine) msg.mn = mine;
+    } else {
+      if (cur.x !== last.x) msg.x = cur.x;
+      if (cur.y !== last.y) msg.y = cur.y;
+      if (cur.z !== last.z) msg.z = cur.z;
+      if (cur.r !== last.r) msg.r = cur.r;
+      if (cur.t !== last.t) msg.t = cur.t;
+      if (cur.hd !== last.hd) msg.hd = cur.hd;
+      if (cur.fl !== last.fl) msg.fl = cur.fl;
+      // `mn` is only ever absent-or-present, so send it (or an explicit clear) on change
+      if (cur.mk !== last.mk) msg.mn = mine || 0;
+      let n = 0; for (const k in msg) n++;
+      if (n === 1) return;   // only `v` — nothing about us changed, say nothing
+    }
+    this._posLast = cur;
+    Net.send('pos', msg);
   },
   // Push our state out THIS INSTANT instead of waiting for the next 15Hz tick. Called
   // either side of a death, so the host learns we're dead before the drops we're about
@@ -16256,6 +16616,7 @@ const Game = {
   mpSendPosNow() {
     if (!Net.connected || !this.player) return;
     this.mpPosTimer = 99;
+    this._posLast = null;   // a death/respawn is no time to be sending a partial packet
     this.sendMyPos(0);
   },
   // typing on a sign (desktop). Mobile goes through Mobile.openKeyboard('sign') instead.
@@ -16402,7 +16763,7 @@ const Game = {
       case 'mp_cancel': Net.disconnect(); this.state = 'mp'; UI.mpCode = ''; break;
       case 'mp_back': Net.disconnect(); this.state = 'title'; UI.mpNotice = ''; break;
       // hosting the currently-loaded world, from the pause menu
-      case 'mp_host_live': this.mpRole = 'host'; this.isGuest = false; this.initNet(); Net.host(Net.defaultRelayUrl(), this.mpSlots); break;
+      case 'mp_host_live': this.mpRole = 'host'; this.isGuest = false; this.mpRDCap = 0; this._sentRDCap = null; this.initNet(); Net.host(Net.defaultRelayUrl(), this.mpSlots); break;
       // how many players the room may hold (us included) — cycles 2..10, wraps round
       case 'mp_slots':
         this.mpSlots = this.mpSlots >= 10 ? 2 : this.mpSlots + 1;
