@@ -15556,7 +15556,7 @@ const Game = {
       if (m.y != null) r.ty = m.y / MP_POS_SCALE;
       if (m.z != null) r.tz = m.z / MP_POS_SCALE;
       if (m.r != null) r.yaw = m.r / MP_ANG_SCALE;
-      if (m.t != null) r.pitch = m.t / MP_ANG_SCALE;
+      if (m.pt != null) r.pitch = m.pt / MP_ANG_SCALE;
       if (m.hd != null) r.held = m.hd || null;
       if (m.mn != null) r.mine = m.mn || null;
       if (m.fl != null) { r.sn = (m.fl & 1) ? 1 : 0; r.dead = !!(m.fl & 2); }
@@ -15662,9 +15662,13 @@ const Game = {
     if (!q || !q.length) return;
     this.mpAmbient = null;
     // a single TNT chain can be a few hundred blocks; chunk it so one frame can't approach
-    // the relay's 4MB cap, and so a huge burst doesn't arrive as one stall on the guest
+    // the relay's 4MB cap, and so a huge burst doesn't arrive as one stall on the guest.
+    // `amb:1` marks this as world-driven rather than a player's own swing — see
+    // applyRemoteBlocks, which uses it to decide whether a break deserves particles/sound
+    // (a receiver spawning a burst per block of a 2000-block explosion would be a firework
+    // show, not a break effect; vanilla doesn't do that either).
     for (let i = 0; i < q.length; i += 2000) {
-      Net.send('blocks', { dim: this.world.dim, edits: q.slice(i, i + 2000) });
+      Net.send('blocks', { dim: this.world.dim, edits: q.slice(i, i + 2000), amb: 1 });
     }
   },
   onRemoteBlocks(m) {
@@ -15683,7 +15687,23 @@ const Game = {
     }
   },
   applyRemoteBlocks(m) {
+    // A player's own break/place never carried any feedback for the OTHER player watching
+    // it happen — the block just vanished with no crack sound, no crumb burst. Ambient
+    // batches (m.amb, see mpFlushAmbient) are explicitly excluded: a 2000-block explosion
+    // or a collapsing leaf canopy would turn into hundreds of simultaneous particle bursts,
+    // and vanilla doesn't spawn break particles for those either. Capped defensively in case
+    // a single player action ever cascades unusually large (a big support-chain collapse).
+    let fx = !m.amb ? 12 : 0;
     for (const e of m.edits) {
+      if (fx > 0 && e[3] === B.AIR) {
+        const was = this.world.getBlock(e[0], e[1], e[2]);
+        if (was !== B.AIR) {
+          Particles.blockBreak(this.world, e[0], e[1], e[2], was);
+          const wd = Blocks[was];
+          if (wd) Sfx.play('break_' + wd.sound, { pos: [e[0], e[1], e[2]] });
+          fx--;
+        }
+      }
       // The chunk streamer runs on a small per-frame budget, so a guest who has just moved
       // can send an edit for a chunk we haven't generated yet — and setBlock silently
       // returns false for those, losing the edit from the authoritative world for good.
@@ -16578,9 +16598,13 @@ const Game = {
     // (~5 MB/hour/player); now it costs one keep-alive every 2 s. Values are the same
     // fixed-point integers the entity stream uses — 3 cm and 1.4 degrees, i.e. vanilla's
     // own wire precision, and the receiver smooths toward them anyway.
+    // NOTE: `t`, `to` and `from` are reserved — Net.send stamps the message type into `t`
+    // AFTER merging this object, and the relay stamps `from`. Pitch used to live in `t` and
+    // was silently overwritten by the string "pos", so every remote head stared straight
+    // ahead. Any new field here has to dodge those three names.
     const cur = {
       x: Math.round(p.x * MP_POS_SCALE), y: Math.round(p.y * MP_POS_SCALE), z: Math.round(p.z * MP_POS_SCALE),
-      r: Math.round(p.yaw * MP_ANG_SCALE), t: Math.round(p.pitch * MP_ANG_SCALE),
+      r: Math.round(p.yaw * MP_ANG_SCALE), pt: Math.round(p.pitch * MP_ANG_SCALE),
       hd: held ? held.id : 0,
       fl: (p.sneaking ? 1 : 0) | (p.deadFlag ? 2 : 0),
       mk: mine ? mine.join(',') : '',
@@ -16592,14 +16616,18 @@ const Game = {
     if (full) {
       this._posFullAt = now;
       msg.q = 1;
-      msg.x = cur.x; msg.y = cur.y; msg.z = cur.z; msg.r = cur.r; msg.t = cur.t;
-      msg.hd = cur.hd; msg.fl = cur.fl; if (mine) msg.mn = mine;
+      msg.x = cur.x; msg.y = cur.y; msg.z = cur.z; msg.r = cur.r; msg.pt = cur.pt;
+      // EVERY field, unconditionally — that is what makes `q` a keyframe. `mn` used to be
+      // omitted when not mining, which left anyone who already had us mining a block showing
+      // break cracks on it forever: the keyframe didn't clear them, and the next delta saw no
+      // change (both sides '' by then) so it never sent the clear either.
+      msg.hd = cur.hd; msg.fl = cur.fl; msg.mn = mine || 0;
     } else {
       if (cur.x !== last.x) msg.x = cur.x;
       if (cur.y !== last.y) msg.y = cur.y;
       if (cur.z !== last.z) msg.z = cur.z;
       if (cur.r !== last.r) msg.r = cur.r;
-      if (cur.t !== last.t) msg.t = cur.t;
+      if (cur.pt !== last.pt) msg.pt = cur.pt;
       if (cur.hd !== last.hd) msg.hd = cur.hd;
       if (cur.fl !== last.fl) msg.fl = cur.fl;
       // `mn` is only ever absent-or-present, so send it (or an explicit clear) on change
