@@ -15688,19 +15688,27 @@ const Game = {
   },
   applyRemoteBlocks(m) {
     // A player's own break/place never carried any feedback for the OTHER player watching
-    // it happen — the block just vanished with no crack sound, no crumb burst. Ambient
-    // batches (m.amb, see mpFlushAmbient) are explicitly excluded: a 2000-block explosion
-    // or a collapsing leaf canopy would turn into hundreds of simultaneous particle bursts,
-    // and vanilla doesn't spawn break particles for those either. Capped defensively in case
-    // a single player action ever cascades unusually large (a big support-chain collapse).
+    // it happen — the block just vanished (or appeared) with no sound, no crumb burst.
+    // Ambient batches (m.amb, see mpFlushAmbient) are explicitly excluded: a 2000-block
+    // explosion or a collapsing leaf canopy would turn into hundreds of simultaneous bursts,
+    // and vanilla doesn't spawn break particles (or a placement thunk) for those either.
+    // Capped defensively in case a single player action ever cascades unusually large (a
+    // big support-chain collapse, or placing a full double chest).
     let fx = !m.amb ? 12 : 0;
     for (const e of m.edits) {
-      if (fx > 0 && e[3] === B.AIR) {
+      if (fx > 0) {
         const was = this.world.getBlock(e[0], e[1], e[2]);
-        if (was !== B.AIR) {
+        if (e[3] === B.AIR && was !== B.AIR) {
+          // break: crumb particles + the OLD block's break sound
           Particles.blockBreak(this.world, e[0], e[1], e[2], was);
           const wd = Blocks[was];
           if (wd) Sfx.play('break_' + wd.sound, { pos: [e[0], e[1], e[2]] });
+          fx--;
+        } else if (e[3] !== B.AIR && was !== e[3]) {
+          // place: just the thunk, same as afterPlace's local sound — no particles,
+          // vanilla doesn't spawn any when a block appears
+          const nd = Blocks[e[3]];
+          if (nd) Sfx.play('place_' + nd.sound, { pos: [e[0], e[1], e[2]] });
           fx--;
         }
       }
