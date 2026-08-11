@@ -10780,6 +10780,7 @@ class Player {
     this.selected = 0;
     this.keys = {};
     this.sprinting = false; this.sneaking = false;
+    this.moveAnalog = null;   // {x,z} from the touch joystick; null = use the digital keys
     this.fly = false;
     this.mining = null;
     this.swing = 1; // swing anim progress (1 = idle)
@@ -10830,9 +10831,11 @@ class Player {
     // freeze movement input while an inventory/container screen or chat is open
     const uiOpen = (typeof UI !== 'undefined' && UI.screen !== 'none') || (typeof Chat !== 'undefined' && Chat.open);
     const K = uiOpen ? NO_KEYS : this.keys;
+    // Touch joystick supplies an analog vector (Mobile.applyStick); the keyboard stays digital.
+    const an = uiOpen ? null : this.moveAnalog;
     // sneaking / sprinting
     this.sneaking = !!K.sneak && !this.fly;
-    const fwd = !!K.fwd;
+    const fwd = an ? an.z < -0.35 : !!K.fwd;
     if (K.sprint && fwd && this.hunger > 6 && !this.sneaking && this.eating <= 0) this.sprinting = true;
     if (!fwd || this.sneaking || this.hunger <= 6) this.sprinting = false;
     this.eyeH = lerp(this.eyeH, this.sneaking ? 1.35 : 1.62, dt * 14);
@@ -10845,12 +10848,20 @@ class Player {
     const inLava = headBlock === B.LAVA || feetBlock === B.LAVA;
     // movement input
     let ax = 0, az = 0;
-    if (K.fwd) az -= 1;
-    if (K.back) az += 1;
-    if (K.left) ax -= 1;
-    if (K.right) ax += 1;
-    const len = Math.hypot(ax, az) || 1;
-    ax /= len; az /= len;
+    if (an) {
+      // analog: clamp to the unit disc but KEEP a partial push partial — that is the whole
+      // point, a half-pushed stick has to walk at half speed instead of snapping to full
+      ax = an.x; az = an.z;
+      const m = Math.hypot(ax, az);
+      if (m > 1) { ax /= m; az /= m; }
+    } else {
+      if (K.fwd) az -= 1;
+      if (K.back) az += 1;
+      if (K.left) ax -= 1;
+      if (K.right) ax += 1;
+      const len = Math.hypot(ax, az) || 1;
+      ax /= len; az /= len;   // digital: a diagonal must not be faster than a straight line
+    }
     const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw);
     let wx = ax * cos - az * sin;
     let wz = ax * sin + az * cos;
@@ -11652,21 +11663,30 @@ class Player {
         w.setBlock(hit.x, hit.y + 1, hit.z, B.WHEAT_CROP, 0);
         this.consumeHeld();
         Sfx.play('place_grass', { pos: [hit.x, hit.y, hit.z] });
+        this.useCd = USE_REPEAT; this.swingNow();
       }
       return;
     }
     // bonemeal
+    // Every branch that eats an item MUST set useCd — updateUse() re-fires usePress() once per
+    // frame while the button is held, and a normal ~200ms click is ~12 frames. Without the
+    // cooldown one tap on a crop drained the whole stack (the crop stays B.WHEAT_CROP after
+    // growing, so the branch just kept re-running); same for the grass branch.
     if (held.id === 'bonemeal') {
       if (id === B.WHEAT_CROP) {
+        // already fully grown: vanilla does nothing and keeps the bonemeal
+        if ((w.getData(hit.x, hit.y, hit.z) & 7) >= 7) return;
         w.setBlock(hit.x, hit.y, hit.z, B.WHEAT_CROP, 7);
         Particles.burst('happy', hit.x + 0.5, hit.y + 0.5, hit.z + 0.5, 8);
         this.consumeHeld();
+        this.useCd = USE_REPEAT; this.swingNow();
         return;
       }
       if (id === B.SAPLING) {
         if (growTreeAt(w, hit.x, hit.y, hit.z)) {
           Particles.burst('happy', hit.x + 0.5, hit.y + 1, hit.z + 0.5, 10);
           this.consumeHeld();
+          this.useCd = USE_REPEAT; this.swingNow();
         }
         return;
       }
@@ -11684,6 +11704,7 @@ class Player {
         }
         Particles.burst('happy', hit.x + 0.5, hit.y + 1.2, hit.z + 0.5, 10);
         this.consumeHeld();
+        this.useCd = USE_REPEAT; this.swingNow();
         return;
       }
       return;
@@ -14051,6 +14072,7 @@ const Net = {
   errorMsg: '',
   handlers: {},      // msg type -> [fn(msg)]
   relayUrl: '',
+  lastMsgT: 0,       // performance.now() of the last frame received (see isSilent)
 
   get count() { return this.peers.length + (this.pid == null ? 0 : 1); },
   // true once there is somebody else to talk to
@@ -14108,9 +14130,31 @@ const Net = {
     ws.onmessage = (ev) => {
       let msg;
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      this.lastMsgT = performance.now();
       this._handleMsg(msg);
     };
     return ws;
+  },
+  // ---- silent-death detection (guest side) ----
+  // A phone that loses wifi gets no close event for a long time: the socket stays "open"
+  // and the guest keeps happily playing a world that has stopped receiving the host's
+  // edits. They then act on stale terrain — re-breaking a block that is already gone for
+  // everyone else. The relay's ping/pong reaps the socket from ITS side (see relay.js),
+  // but the browser never tells page JS about a pong, so the guest needs its own signal:
+  // the host streams `pos` at 15Hz and `env` every 1.5s, so several seconds of total
+  // silence can only mean the link is dead.
+  // 15s, not tighter: a HOST who briefly backgrounds their phone stops sending (a background
+  // tab's timers are throttled to ~1Hz, and rAF stops dead), and ejecting the whole room over
+  // a five-second glance at a notification would be worse than the bug. Still comfortably
+  // inside the relay's own ~45s ping/pong reap, so a guest always learns before it is dropped.
+  SILENCE_MS: 15000,
+  markAlive() { this.lastMsgT = performance.now(); },
+  // true once the host has gone quiet for too long (guests only — a host alone in a room
+  // legitimately receives nothing at all)
+  isSilent() {
+    if (this.role !== 'guest' || this.status !== 'connected') return false;
+    if (!this.lastMsgT) return false;
+    return performance.now() - this.lastMsgT > this.SILENCE_MS;
   },
   // host: 'hosting' while alone, 'connected' once at least one guest is in
   _refreshStatus() {
@@ -14175,10 +14219,18 @@ const Net = {
   disconnect() {
     if (this.ws) { try { this.ws.onclose = null; this.ws.close(); } catch (e) {} }
     this.ws = null; this.role = null; this.code = null; this.status = 'idle';
-    this.pid = null; this.peers = []; this.errorMsg = '';
+    this.pid = null; this.peers = []; this.lastMsgT = 0; this.errorMsg = '';
   },
   get connected() { return this.status === 'connected'; },
 };
+
+// Backgrounding a phone freezes the game loop (rAF stops), so on the way back `lastMsgT`
+// is stale by however long the app was away and isSilent() would fire instantly on a
+// perfectly healthy connection. Restart the clock on resume and let it re-measure.
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) Net.markAlive(); });
+  window.addEventListener('focus', () => Net.markAlive());
+}
 
 </script>
 <script>
@@ -14200,7 +14252,14 @@ const Mobile = {
   stickId: null, knobX: 0, knobY: 0,
   lookId: null, lookX: 0, lookY: 0,
   sprintOn: false,
+  sneakOn: false,             // touch sneak is a TOGGLE (Bedrock-style), not a hold
+  _sneakPulse: false,         // one-shot sneak while riding (= "hop out"), see pressControl
   active: {},                 // control id -> true (pressed/toggled) for highlight
+  // ---- analog joystick state (see stick{} below) ----
+  moveX: 0, moveZ: 0,         // smoothed output fed to the player (-1..1, z<0 = forward)
+  moveTX: 0, moveTZ: 0,       // raw target straight from the finger
+  stickSprint: false,         // sprint started by the double-tap-forward gesture
+  _stickFwd: false, _fwdEdgeT: 0,
   lastJump: 0,
   dragCtrl: null, dragId: null,
   creativeAcc: 0,
@@ -14212,7 +14271,7 @@ const Mobile = {
   DEFS: {
     move:   { nx: 0.135, ny: 0.72, rmul: 1.9, kind: 'stick' },
     jump:   { nx: 0.905, ny: 0.80, rmul: 1.15, kind: 'hold', glyph: 'up' },
-    sneak:  { nx: 0.775, ny: 0.885, rmul: 1.0, kind: 'hold', glyph: 'down' },
+    sneak:  { nx: 0.775, ny: 0.885, rmul: 1.0, kind: 'toggle', glyph: 'down' },
     sprint: { nx: 0.665, ny: 0.72, rmul: 1.0, kind: 'toggle', glyph: 'run' },
     break:  { nx: 0.905, ny: 0.53, rmul: 1.15, kind: 'hold', glyph: 'mine' },
     use:    { nx: 0.775, ny: 0.66, rmul: 1.0, kind: 'hold', glyph: 'use' },
@@ -14224,6 +14283,20 @@ const Mobile = {
     view:   { nx: 0.225, ny: 0.09, rmul: 0.85, kind: 'tap', glyph: 'eye' },
   },
   BASE_R: 34,   // base button radius in CSS px (before rmul * layout.size)
+
+  // ---- joystick feel ----
+  // Anything judged by feel gets a knob first (same lesson as Game.crouchPose / Game.bodyTurn):
+  // live-tweakable from the console as `Mobile.stick.dead = 0.2` etc.
+  stick: {
+    dead: 0.16,       // fraction of the travel ignored around the centre
+    curve: 0.55,      // 0 = linear response, 1 = strongly expo (fine control near the centre)
+    minOut: 0.18,     // speed the instant you leave the deadzone, so it never feels dead
+    smooth: 22,       // per-second rate the output chases the finger (kills thumb jitter)
+    keyThresh: 0.2,   // above this the matching digital key is held too (boats, sleep-wake)
+    tapWindow: 350,   // ms allowed between the two forward pushes that start a sprint
+    tapFwd: 0.55,     // how far forward counts as a "push"
+    tapBack: 0.28,    // must fall back inside this before the next push counts as a new one
+  },
 
   order() {
     // draw/hit order (later = on top); pause & utility first, action buttons last
@@ -14413,6 +14486,17 @@ const Mobile = {
     }
     return null;
   },
+  // Maps how far the stick is pushed (0..1) to how fast you go (0..1). A plain deadzone
+  // test gave FULL speed the moment you crossed it, which is what made the old stick feel
+  // twitchy and "chopped" — there was no walk, only stop and run.
+  stickAmp(cl) {
+    const S = this.stick;
+    if (cl <= S.dead) return 0;
+    let t = (cl - S.dead) / (1 - S.dead);
+    if (t > 1) t = 1;
+    const curved = t * ((1 - S.curve) + S.curve * t);   // gentle expo: fine control down low
+    return S.minOut + (1 - S.minOut) * curved;
+  },
   stickVec(x, y) {
     const c = this.cpos('move');
     let dx = x - c.x, dy = y - c.y;
@@ -14420,17 +14504,56 @@ const Mobile = {
     const mag = Math.hypot(dx, dy) || 0.0001;
     if (mag > r) { this.knobX = c.x + dx / mag * r; this.knobY = c.y + dy / mag * r; }
     else { this.knobX = c.x + dx; this.knobY = c.y + dy; }
-    const nx = dx / r, ny = dy / r, cl = Math.min(1, mag / r), dead = 0.30;
-    const K = this.game.player.keys;
-    K.fwd = ny < -dead; K.back = ny > dead;
-    K.left = nx < -dead; K.right = nx > dead;
-    K.sprint = this.sprintOn || (cl > 0.95 && K.fwd);
+    // direction comes from the raw finger vector, magnitude from the shaped curve
+    const cl = Math.min(1, mag / r), amp = this.stickAmp(cl);
+    this.moveTX = (dx / mag) * amp;
+    this.moveTZ = (dy / mag) * amp;   // screen +y is down = backwards, which is also az > 0
+    this.trackSprintTap(cl, dy / mag);
+  },
+  // Bedrock's sprint gesture: shove forward, let it come back, shove forward again.
+  // Replaces the old "push to the very edge = sprint", which meant you could not walk
+  // at full tilt without breaking into a run.
+  trackSprintTap(cl, uy) {
+    const S = this.stick;
+    const fwdAmt = -uy * cl;            // 1 = pushed straight forward, 0 = centred/sideways
+    if (fwdAmt >= S.tapFwd) {
+      if (!this._stickFwd) {            // rising edge = one forward push
+        const now = performance.now();
+        if (now - this._fwdEdgeT <= S.tapWindow) this.stickSprint = true;
+        this._fwdEdgeT = now;
+        this._stickFwd = true;
+      }
+    } else if (fwdAmt <= S.tapBack) {
+      this._stickFwd = false;           // hysteresis, so one shaky push isn't read as two
+    }
+  },
+  // Per-frame: ease the output toward the finger and hand it to the player. Exponential
+  // smoothing so the feel doesn't change with the frame rate.
+  applyStick(dt) {
+    const p = this.game.player, K = p.keys, S = this.stick;
+    const k = dt > 0 ? 1 - Math.exp(-S.smooth * dt) : 1;
+    this.moveX += (this.moveTX - this.moveX) * k;
+    this.moveZ += (this.moveTZ - this.moveZ) * k;
+    p.moveAnalog = { x: this.moveX, z: this.moveZ };
+    // Keep the digital keys in sync — boats, minecarts and the get-out-of-bed check still
+    // read them, and player.update()'s sprint gate wants to know we're pushing forward.
+    const t = S.keyThresh;
+    K.fwd = this.moveZ < -t; K.back = this.moveZ > t;
+    K.left = this.moveX < -t; K.right = this.moveX > t;
+    K.sprint = this.sprintOn || this.stickSprint;
+    this.active.sprint = K.sprint;      // the sprint button lights up for a gesture sprint too
   },
   clearMove() {
     if (!this.game || !this.game.player) return;
-    const K = this.game.player.keys;
+    const p = this.game.player, K = p.keys;
     K.fwd = K.back = K.left = K.right = false;
+    // finger lifted: stop dead (the player's own velocity lerp does the deceleration) and
+    // drop the gesture sprint, so it never carries over into the next touch
+    this.moveTX = this.moveTZ = this.moveX = this.moveZ = 0;
+    this.stickSprint = false; this._stickFwd = false;
+    p.moveAnalog = null;
     K.sprint = this.sprintOn;
+    this.active.sprint = this.sprintOn;
   },
   lookMove(x, y) {
     const p = this.game.player;
@@ -14452,7 +14575,13 @@ const Mobile = {
         }
         this.lastJump = now; break;
       }
-      case 'sneak': K.sneak = true; break;
+      // Sneak is a toggle like sprint: tap to crouch, tap again to stand. Riding and flying
+      // are the exceptions — there K.sneak means "hop out" (player.updateRiding) and "descend",
+      // both momentary in vanilla, so they fire a one-shot pulse instead of latching.
+      case 'sneak':
+        if (p.riding || p.fly) { K.sneak = true; this._sneakPulse = true; }
+        else this.setSneak(!this.sneakOn);
+        break;
       case 'break': K.attack = true; p.attackPress(); break;
       case 'use': K.use = true; p.usePress(); break;
       case 'sprint': this.sprintOn = !this.sprintOn; K.sprint = this.sprintOn; this.active.sprint = this.sprintOn; break;
@@ -14469,7 +14598,8 @@ const Mobile = {
         break;
       case 'view': this.active.view = false; this.game.cycleView(); break;
     }
-    if (typeof Sfx !== 'undefined' && (this.DEFS[idc].kind === 'tap' || idc === 'sprint')) Sfx.play('click');
+    // click feedback for anything that isn't a press-and-hold (taps + every toggle)
+    if (typeof Sfx !== 'undefined' && this.DEFS[idc].kind !== 'hold' && this.DEFS[idc].kind !== 'stick') Sfx.play('click');
   },
   releaseControl(idc) {
     const K = this.game.player && this.game.player.keys;
@@ -14477,10 +14607,16 @@ const Mobile = {
     if (this.DEFS[idc] && this.DEFS[idc].kind === 'hold') this.active[idc] = false;
     switch (idc) {
       case 'jump': K.jump = false; break;
-      case 'sneak': K.sneak = false; break;
+      // toggle: lifting the finger must NOT un-crouch. Only a dismount pulse ends here.
+      case 'sneak': if (this._sneakPulse) { this._sneakPulse = false; K.sneak = this.sneakOn; } break;
       case 'break': K.attack = false; break;
       case 'use': K.use = false; break;
     }
+  },
+  setSneak(on) {
+    this.sneakOn = !!on;
+    this.active.sneak = this.sneakOn;
+    if (this.game && this.game.player) this.game.player.keys.sneak = this.sneakOn;
   },
   hotbarHit(x, y) {
     if (!this.game.player) return -1;
@@ -14654,9 +14790,22 @@ const Mobile = {
   },
 
   // ---- per-frame safety ----
-  update() {
+  update(dt) {
     if (!this.enabled || !this.inPlay()) return;
+    const p = this.game.player;
+    if (!p) return;
     if (this.stickId === null) this.clearMove();
+    else this.applyStick(dt || 0);
+    // Re-assert the sneak toggle: other systems clear keys wholesale (Chat.openChat wipes
+    // every key, releaseAll on window blur), and a toggle has to survive that — the same way
+    // sprint self-heals through clearMove(). Only ever forced ON, so a desktop keyboard Shift
+    // is left alone.
+    // Dropped in the three states where a latched K.sneak means something other than crouching:
+    // dead (would respawn crouched), flying (K.sneak = descend — a latched one sinks you into
+    // the void unattended) and riding (K.sneak = hop out — would eject you on mount). mount()
+    // gives a 0.4s dismountCd, so this lands well inside the grace window either tick order.
+    if (p.deadFlag || p.fly || p.riding) { if (this.sneakOn) this.setSneak(false); }
+    else if (this.sneakOn && !this._sneakPulse) p.keys.sneak = true;
   },
 
   // ---- rendering ----
@@ -16858,6 +17007,17 @@ const Game = {
   },
   // dropped out of somebody else's world: tear it down like a normal quit, but land
   // on the multiplayer screen (code / name / skin) instead of the title, with a note
+  // A guest whose link died silently keeps playing a world that stopped updating — it never
+  // sees another player's edits, so it acts on stale terrain (re-mining a block that is
+  // already gone for everyone else) and nothing it does reaches anyone. Better to say so.
+  // The relay reaps the socket from its end (ping/pong, relay.js); this is the same
+  // detection for the side the browser never tells.
+  // Returns true if it tore the session down, so the caller abandons the rest of the frame.
+  mpCheckSilence() {
+    if (this.state !== 'play' || !Net.isSilent || !Net.isSilent()) return false;
+    this.mpKickToMenu('Connection to the host was lost');
+    return true;
+  },
   mpKickToMenu(reason) {
     // drop the dead connection first: it clears Net.errorMsg/status, so the join
     // screen shows our own reason instead of the raw relay error
@@ -17402,6 +17562,10 @@ const Game = {
   },
   frame(dt) {
     Music.update(dt, this);
+    // Checked here, at the top, and the frame is abandoned if it fires: the kick runs
+    // toTitle(), which nulls this.player/this.world, and the rest of a play tick (streamChunks,
+    // the step-sound block) dereferences them without asking. Doing it mid-tick threw.
+    if (this.mpCheckSilence()) return;
     if (this.state === 'title' || this.state === 'create' || this.state === 'title_options' || this.state === 'worlds' || this.state === 'mp') {
       UI.draw(this, dt);
       return;
@@ -17435,7 +17599,7 @@ const Game = {
         Tex.tickAnim(gl, this.tickCount);
         ticks++;
       }
-      Mobile.update();
+      Mobile.update(dt);
       p.update(dt, this);
       updateEntities(w, dt, this);
       this.updateRemotes(dt);
