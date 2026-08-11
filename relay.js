@@ -19,6 +19,15 @@ const MAX_ROOMS = 500;                 // hard cap on concurrent rooms
 const MAX_PER_IP = 5;                  // rooms a single IP may host at once
 const ROOM_TTL_MS = 1000 * 60 * 30;    // unclaimed/idle room reaped after 30 min
 const MSG_RATE_LIMIT = 150;            // max messages per socket per second
+// Liveness. A phone that walks out of wifi range never sends a TCP FIN or a WebSocket close
+// frame, so the socket sits in OPEN on this side until the OS TCP keepalive gives up — which
+// on Linux defaults to over two hours. For that whole time the guest still occupies a pid,
+// so `freePid` keeps skipping it and the room answers "room full" to the player trying to get
+// back in, while the host still sees their avatar standing there. WebSocket ping/pong is
+// answered by the browser itself (not by page JS), so a backgrounded or frame-throttled tab
+// still replies — only a genuinely dead link misses one.
+const HEARTBEAT_MS = 15000;            // ping every socket this often
+const HEARTBEAT_MISSES = 2;            // drop after this many unanswered pings (~30-45s)
 const MIN_PLAYERS = 2, MAX_PLAYERS = 10; // total players in a room, host included
 // world-snapshot frames (seed + all block edits) can be large; allow up to 4MB.
 // pos updates are tiny — the rate limit is the real flood guard.
@@ -85,6 +94,16 @@ function closeRoom(code, reason) {
   if (n <= 1) ipRoomCount.delete(r.hostIP); else ipRoomCount.set(r.hostIP, n - 1);
 }
 
+// Drop guests whose socket is already gone but whose 'close' never ran (or hasn't yet).
+// Cheap insurance so a player is never told "room full" by a slot nobody is sitting in.
+function reapDeadGuests(r) {
+  for (const [pid, ws] of Array.from(r.guests)) {
+    if (ws && ws.readyState !== ws.CLOSED && ws.readyState !== ws.CLOSING) continue;
+    r.guests.delete(pid);
+    roomBroadcast(r, { t: 'peer_leave', pid, count: playerCount(r), slots: r.maxPlayers }, pid);
+  }
+}
+
 // periodic reap of stale rooms
 setInterval(() => {
   const now = Date.now();
@@ -92,6 +111,18 @@ setInterval(() => {
     if (now - r.lastActivity > ROOM_TTL_MS) closeRoom(code, 'timeout');
   }
 }, 60 * 1000);
+
+// Liveness heartbeat (see HEARTBEAT_MS). terminate() runs the normal 'close' handler, so a
+// reaped guest frees its pid and the room gets the usual peer_leave — the host's client
+// removes the avatar through the path it already has.
+setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.readyState !== ws.OPEN) continue;
+    if (ws._missedPongs >= HEARTBEAT_MISSES) { ws.terminate(); continue; }
+    ws._missedPongs++;
+    try { ws.ping(); } catch (e) {}
+  }
+}, HEARTBEAT_MS);
 
 // /health also answers "is compression actually on?" — a proxy in front of this process
 // (Render's, say) is free to drop the Sec-WebSocket-Extensions header during the upgrade,
@@ -139,6 +170,8 @@ wss.on('connection', (ws, req) => {
   // ws exposes the negotiated extensions as a comma-joined NAME LIST, not an object
   ws._deflate = String(ws.extensions || '').includes('permessage-deflate');
   ws._rate = { count: 0, windowStart: Date.now() };
+  ws._missedPongs = 0;
+  ws.on('pong', () => { ws._missedPongs = 0; });
   ws._role = null;   // 'host' | 'guest'
   ws._pid = null;    // 0 for host, 1..n for guests
   ws._code = null;
@@ -172,6 +205,7 @@ wss.on('connection', (ws, req) => {
       const code = String(msg.code || '').trim();
       const r = rooms.get(code);
       if (!r) { sendTo(ws, { t: 'error', msg: 'room not found' }); return; }
+      reapDeadGuests(r);   // never reject on a slot held by a socket that is already gone
       const pid = freePid(r);
       if (!pid) { sendTo(ws, { t: 'error', msg: 'room full' }); return; }
       r.guests.set(pid, ws); r.lastActivity = now;
