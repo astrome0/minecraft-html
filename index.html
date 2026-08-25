@@ -283,6 +283,34 @@ function collideAxis(box, world, axis, delta) {
 // format helpers
 function fmtCoord(n) { return (Math.round(n * 1000) / 1000).toFixed(3); }
 
+// ---------- difficulty ----------
+// Vanilla's four. The ARRAY ORDER is the save/wire format (an index), so this list may be
+// appended to but never reordered.
+const DIFFICULTIES = ['peaceful', 'easy', 'normal', 'hard'];
+const DIFFICULTY_LABEL = { peaceful: 'Peaceful', easy: 'Easy', normal: 'Normal', hard: 'Hard' };
+// The lowest health starvation is allowed to take you to, per vanilla:
+//   peaceful - never starves you at all (and the bar refills on its own)
+//   easy     - stops at 10 (five hearts)
+//   normal   - stops at 1 (half a heart)  <- what this game did unconditionally before
+//   hard     - no floor, it kills
+// So the old `if (this.hp > 1)` was not a bug, it was the Normal rule applied to everything.
+const STARVE_FLOOR = { peaceful: null, easy: 10, normal: 1, hard: 0 };
+function validDifficulty(d) { return DIFFICULTIES.indexOf(d) >= 0 ? d : 'normal'; }
+
+// How hard a hostile hits, by difficulty. Vanilla's own numbers fall out of these: a zombie's
+// base 3 becomes 2 / 3 / 4 on easy / normal / hard, which is exactly what vanilla deals.
+// Explosions are deliberately NOT in here - in vanilla, TNT and creeper blasts do the same
+// damage on every difficulty, and TNT is player-driven anyway.
+const DIFFICULTY_DMG = { peaceful: 0, easy: 0.67, normal: 1, hard: 1.33 };
+// Returns 0 on peaceful, meaning "this hit does not happen" - callers must skip the hit rather
+// than pass 0 along, because Player.takeDamage floors any damage it is given at 1.
+function hostileDamage(base, difficulty) {
+  const m = DIFFICULTY_DMG[difficulty];
+  if (m === undefined) return base;
+  if (m === 0) return 0;
+  return Math.max(1, Math.round(base * m));
+}
+
 </script>
 <script>
 'use strict';
@@ -422,7 +450,12 @@ const B = {
   TRAPDOOR: 92, FENCE_GATE: 93, GLASS_PANE: 94,
   CLAY: 95, BRICKS: 96, FLOWER_POT: 97,
   SIGN: 98, WALL_SIGN: 99, ITEM_FRAME: 100,
+  SPRUCE_SAPLING: 101, BIRCH_SAPLING: 102,
 };
+// sapling block id → the tree growTreeAt builds from it. B.SAPLING stays the oak one so
+// every world saved before the other two existed keeps growing exactly what it did.
+const SAPLING_KIND = { [B.SAPLING]: 'oak', [B.SPRUCE_SAPLING]: 'spruce', [B.BIRCH_SAPLING]: 'birch' };
+const IS_SAPLING = id => SAPLING_KIND[id] !== undefined;
 
 // wool/dye colours — vanilla data values, so the table can grow to all 16 later without
 // invalidating a single saved world. Only the dyes we can actually craft exist for now.
@@ -460,6 +493,8 @@ const POTTED = {
   4: { item: 'mushroom_brown', tex: 'mushroom_brown' },
   5: { item: 'mushroom_red', tex: 'mushroom_red' },
   6: { item: 'cactus', tex: 'cactus_side', cube: true },
+  7: { item: 'spruce_sapling', tex: 'spruce_sapling' },
+  8: { item: 'birch_sapling', tex: 'birch_sapling' },
 };
 const POT_DATA_FOR = {}; // item id → pot data value
 for (const d in POTTED) POT_DATA_FOR[POTTED[d].item] = +d;
@@ -503,6 +538,8 @@ defBlock(B.DIRT, { name: 'dirt', label: 'Dirt', tex: { all: 'dirt' }, hard: 0.5,
 defBlock(B.COBBLE, { name: 'cobblestone', label: 'Cobblestone', tex: { all: 'cobblestone' }, hard: 2, tool: 'pickaxe', tier: 0 });
 defBlock(B.PLANKS, { name: 'planks', label: 'Oak Wood Planks', tex: { all: 'planks' }, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
 defBlock(B.SAPLING, { name: 'sapling', label: 'Oak Sapling', tex: { all: 'sapling' }, model: 'cross', solid: false, hard: 0, sound: 'grass', cutout: true });
+defBlock(B.SPRUCE_SAPLING, { name: 'spruce_sapling', label: 'Spruce Sapling', tex: { all: 'spruce_sapling' }, model: 'cross', solid: false, hard: 0, sound: 'grass', cutout: true });
+defBlock(B.BIRCH_SAPLING, { name: 'birch_sapling', label: 'Birch Sapling', tex: { all: 'birch_sapling' }, model: 'cross', solid: false, hard: 0, sound: 'grass', cutout: true });
 defBlock(B.BEDROCK, { name: 'bedrock', label: 'Bedrock', tex: { all: 'bedrock' }, hard: -1, drops: () => [] });
 defBlock(B.WATER, { name: 'water', label: 'Water', tex: { all: 'water' }, model: 'liquid', solid: false, opaque: false, translucent: true, hard: -1, opacity: 2, drops: () => [] });
 defBlock(B.LAVA, { name: 'lava', label: 'Lava', tex: { all: 'lava' }, model: 'liquid', solid: false, opaque: false, hard: -1, lum: 15, drops: () => [] });
@@ -564,10 +601,10 @@ defBlock(B.END_PORTAL_FRAME, { name: 'end_portal_frame', label: 'End Portal Fram
 defBlock(B.END_PORTAL, { name: 'end_portal', label: 'End Portal', tex: { all: 'end_portal' }, model: 'endportal', solid: false, opaque: false, hard: -1, lum: 15, drops: () => [] });
 defBlock(B.SPRUCE_LOG, { name: 'spruce_log', label: 'Spruce Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'spruce_log' }, pillar: true, log: true, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
 defBlock(B.SPRUCE_LEAVES, { name: 'spruce_leaves', label: 'Spruce Leaves', tex: { all: 'spruce_leaves' }, opaque: false, cutout: true, leaves: true, hard: 0.2, sound: 'grass', opacity: 1, flammable: true,
-  drops: rng => rng.chance(0.05) ? [{ id: 'sapling', n: 1 }] : [] });
+  drops: rng => rng.chance(0.05) ? [{ id: 'spruce_sapling', n: 1 }] : [] });
 defBlock(B.BIRCH_LOG, { name: 'birch_log', label: 'Birch Wood', tex: { top: 'log_top', bottom: 'log_top', side: 'birch_log' }, pillar: true, log: true, hard: 2, tool: 'axe', sound: 'wood', flammable: true });
 defBlock(B.BIRCH_LEAVES, { name: 'birch_leaves', label: 'Birch Leaves', tex: { all: 'birch_leaves' }, opaque: false, cutout: true, leaves: true, hard: 0.2, sound: 'grass', opacity: 1, flammable: true,
-  drops: rng => rng.chance(0.05) ? [{ id: 'sapling', n: 1 }] : [] });
+  drops: rng => rng.chance(0.05) ? [{ id: 'birch_sapling', n: 1 }] : [] });
 defBlock(B.TALL_GRASS, { name: 'tall_grass', label: 'Grass', tex: { all: 'tall_grass' }, model: 'cross', solid: false, hard: 0, sound: 'grass', cutout: true, tint: 'grass', replaceable: true,
   drops: rng => rng.chance(0.125) ? [{ id: 'seeds', n: 1 }] : [] });
 // door: data bit0 = upper half, bits1-2 = facing, bit3 = open, bit4 = hinge on the right
@@ -840,6 +877,32 @@ function blockBreakTime(id, heldItem) {
   if (def.tool === 'shovel' || def.tool === 'axe' || !def.tool) canHarvest = true;
   return def.hard * (canHarvest ? 1.5 : 5) / speed;
 }
+// ---------- unknown blocks ----------
+// A world can contain a block id nothing has defined — a mod's block in a save opened without
+// that mod, most of all. Every `Blocks[id].something` in the mesher, the renderer and the
+// physics then throws on undefined and the whole world fails to load, which is a hard crash
+// over one stray block. Filling the gaps with an inert placeholder turns that into "there is
+// an obviously wrong magenta cube here", which you can walk around, look at and mine away.
+//
+// Called from Game.init AFTER Tex.init, deliberately: the auto-item loop in items.js and the
+// icon loop in buildIcons() both walk `Blocks`, and they must not manufacture items and
+// creative-grid entries for 150-odd placeholders. By the time this runs they are done.
+// Each id gets its OWN object so `def.id` is always the id it was looked up by.
+function makeUnknownBlock(id) {
+  return {
+    id, name: 'unknown_' + id, label: 'Unknown Block', unknown: true,
+    tex: { all: 'missing' }, model: 'cube', solid: true, opaque: true,
+    hard: 1.5, tool: 'pickaxe', tier: 0, lum: 0, opacity: 15, sound: 'stone',
+    drops: () => [],   // it isn't a real block, so it must not hand out a real item
+  };
+}
+// Fills every gap in 0..255 (the chunk store is a Uint8Array, so that is the whole id space).
+// Safe to call again later — a mod that unregisters its block calls this to put the
+// placeholder back rather than leaving a hole behind.
+function fillUnknownBlocks() {
+  for (let i = 0; i < 256; i++) if (!Blocks[i]) Blocks[i] = makeUnknownBlock(i);
+}
+
 function blockCanHarvest(id, heldItem) {
   const def = Blocks[id];
   if (!def) return false;
@@ -976,12 +1039,47 @@ for (const m of SPAWN_EGG_MOBS) {
 const ARMOR = { helmet: [0, 'Helmet'], chestplate: [1, 'Chestplate'], leggings: [2, 'Leggings'], boots: [3, 'Boots'] };
 const ARMOR_PTS = { iron: [2, 6, 5, 2], diamond: [3, 8, 6, 3] };
 const ARMOR_DUR = { iron: [165, 240, 225, 195], diamond: [363, 528, 495, 429] };
-for (const mat of ['iron', 'diamond']) {
+// The materials that exist, in wire order — the index+1 is what goes over the network and
+// what picks the armour texture sheet, so NEVER reorder this list, only append to it.
+const ARMOR_MATERIALS = ['iron', 'diamond'];
+for (const mat of ARMOR_MATERIALS) {
   for (const piece in ARMOR) {
     const [slot, Label] = ARMOR[piece];
     const Mat = mat[0].toUpperCase() + mat.slice(1);
-    defItem(mat + '_' + piece, { label: Mat + ' ' + Label, icon: 'i_' + mat + '_' + piece, stack: 1, armor: { slot, pts: ARMOR_PTS[mat][slot] }, dur: ARMOR_DUR[mat][slot] });
+    defItem(mat + '_' + piece, { label: Mat + ' ' + Label, icon: 'i_' + mat + '_' + piece, stack: 1, armor: { slot, pts: ARMOR_PTS[mat][slot], mat }, dur: ARMOR_DUR[mat][slot] });
   }
+}
+// ---- what a player is WEARING, for the model and for the wire ----
+// A worn stack → its material name, or null for an empty slot / something that isn't armour.
+function armorMatOf(stack) {
+  const def = stack && stack.id ? Items[stack.id] : null;
+  return def && def.armor ? def.armor.mat : null;
+}
+// The four armour slots as material names, straight off an inventory.
+function armorSuitOf(inv) {
+  if (!inv || !inv.armor) return null;
+  return [armorMatOf(inv.armor[0]), armorMatOf(inv.armor[1]), armorMatOf(inv.armor[2]), armorMatOf(inv.armor[3])];
+}
+// Multiplayer wire form: one small int, 4 bits per slot (0 = nothing, else material index+1).
+// Armour changes maybe twice an hour, so it rides the differential 'pos' packet and costs
+// nothing while nobody is getting dressed.
+function armorSuitPack(suit) {
+  if (!suit) return 0;
+  let v = 0;
+  for (let i = 0; i < 4; i++) {
+    const mi = suit[i] ? ARMOR_MATERIALS.indexOf(suit[i]) : -1;
+    if (mi >= 0) v |= (mi + 1) << (i * 4);
+  }
+  return v;
+}
+function armorSuitUnpack(v) {
+  if (!v) return null;
+  const suit = [null, null, null, null];
+  for (let i = 0; i < 4; i++) {
+    const n = (v >> (i * 4)) & 15;
+    if (n) suit[i] = ARMOR_MATERIALS[n - 1] || null;
+  }
+  return suit;
 }
 
 // ---------- Crafting recipes ----------
@@ -1865,13 +1963,35 @@ function buildBlockTextures() {
       }
     }
   });
-  T.reg('sapling', (s, r) => {
+  // saplings: one painter, three woods. `crown` decides the silhouette so a spruce reads as a
+  // little conifer and a birch as a thin pale sprig even at 16x16 — otherwise all three are the
+  // same green blob and you can't tell what you're about to plant.
+  const saplingFn = (bark, leafHi, leafLo, crown) => (s, r) => {
     for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) s(x, y, [0, 0, 0, 0]);
-    for (let y = 9; y < 15; y++) s(7, y, [104, 78, 47]);
-    for (let dy = -3; dy <= 2; dy++) for (let dx = -3; dx <= 3; dx++) {
-      if (Math.abs(dx) + Math.abs(dy) <= 3 && r.chance(0.8)) s(7 + dx, 6 + dy, r.chance(0.4) ? [95, 183, 68] : [58, 146, 32]);
+    for (let y = 9; y < 15; y++) s(7, y, bark);
+    const leaf = () => r.chance(0.4) ? leafHi : leafLo;
+    if (crown === 'spruce') {
+      // narrow triangle: widest at the bottom, a single tip on top
+      for (let dy = 0; dy <= 5; dy++) {
+        const w = dy < 2 ? 0 : (dy - 1) >> 1;
+        for (let dx = -w; dx <= w; dx++) if (r.chance(0.9)) s(7 + dx, 3 + dy, leaf());
+      }
+      for (let y = 9; y < 11; y++) s(7, y, leafLo);
+    } else if (crown === 'birch') {
+      // sparse upright sprig — two thin tufts either side of a pale trunk
+      for (let dy = -3; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        if (Math.abs(dx) + Math.abs(dy) <= 3 && r.chance(0.62)) s(7 + dx, 6 + dy, leaf());
+      }
+      for (let y = 4; y < 9; y++) if (r.chance(0.6)) s(7, y, bark);
+    } else {
+      for (let dy = -3; dy <= 2; dy++) for (let dx = -3; dx <= 3; dx++) {
+        if (Math.abs(dx) + Math.abs(dy) <= 3 && r.chance(0.8)) s(7 + dx, 6 + dy, leaf());
+      }
     }
-  });
+  };
+  T.reg('sapling', saplingFn([104, 78, 47], [95, 183, 68], [58, 146, 32], 'oak'));
+  T.reg('spruce_sapling', saplingFn([78, 58, 34], [110, 166, 106], [62, 118, 62], 'spruce'));
+  T.reg('birch_sapling', saplingFn([196, 194, 186], [156, 194, 106], [112, 154, 74], 'birch'));
   T.reg('ladder', (s, r) => {
     // two rails + 4 rungs, transparent background
     const rail = [124, 99, 56], hi = [162, 130, 78], dk = [96, 74, 40];
@@ -2965,6 +3085,59 @@ function buildMobSkins() {
     P(R, 11, 12, [206, 140, 110]); P(R, 12, 12, [206, 140, 110]);
     P(R, 10, 14, [140, 80, 60]); P(R, 11, 14, [140, 80, 60]); P(R, 12, 14, [140, 80, 60]); P(R, 13, 14, [140, 80, 60]);
   });
+
+  // ---- WORN ARMOUR (one 96x32 sheet per material) ----
+  // Vanilla splits armour across two 64x32 layer sheets; this build gives each material one
+  // sheet with its own sub-rects instead, because the boxes are ours to lay out and five pieces
+  // don't fit the classic layout. Each rect is a whole CLOSED box, matching ARMOR_PIECES:
+  //   helmet (0,0) 8x8x8 | chest (32,0) 8x12x4 | leggings (56,0) 4x12x4
+  //   sleeve (0,16) 4x10x4 | boot (16,16) 4x5x4
+  // The only alpha here is the helmet's face opening. An earlier version hid the unwanted parts
+  // of full-length limb boxes with transparency instead, which left the boot open at the top and
+  // see-through from above — the geometry is what defines the shape now, not the alpha.
+  function armorSheet(name, base, hi, dark, rivet) {
+    const R = region(name, 96, 32);
+    const rnd = RNG(xmur3(name)());
+    const plate = () => mixc(base, dark, rnd.next() * 0.55);
+    // Erasing has to go through clearRect: P() paints with fillRect, so rgba(0,0,0,0) over an
+    // opaque pixel composites to *the opaque pixel* and the hole never appears.
+    const E = (x, y) => ctx.clearRect(R[0] + x, R[1] + y, 1, 1);
+    ctx.clearRect(R[0], R[1], 96, 32);   // unpainted == no armour here
+    // all six faces, each with a 1px dark border — without the border the chestplate and both
+    // sleeves inflate into each other and the torso reads as one featureless slab
+    const box = (u, v, w, h, d) => {
+      const r = boxUVRects(u, v, w, h, d);
+      for (const k of ['right', 'front', 'left', 'back', 'top', 'bottom']) {
+        fill(R, r[k], (x, y, fw, fh) => (x === 0 || y === 0 || x === fw - 1 || y === fh - 1) ? dark : plate());
+      }
+      return r;
+    };
+    // helmet: closed head box with the face punched out of the front, so you still see who it is
+    const hr = box(0, 0, 8, 8, 8);
+    for (let y = 3; y < 7; y++) for (let x = 1; x < 7; x++) {
+      if (y === 3 && (x === 1 || x === 6)) continue;   // keep the brow corners
+      E(hr.front[0] + x, hr.front[1] + y);
+    }
+    for (let x = 1; x < 7; x++) P(R, hr.front[0] + x, hr.front[1] + 2, hi);   // browline
+    // chestplate: shoulder highlight and a couple of rivets at the belt
+    const cr = box(32, 0, 8, 12, 4);
+    for (let x = 1; x < 7; x++) P(R, cr.front[0] + x, cr.front[1] + 1, hi);
+    for (const x of [2, 5]) P(R, cr.front[0] + x, cr.front[1] + 9, rivet);
+    // leggings: full leg, belt line at the top
+    const lr = box(56, 0, 4, 12, 4);
+    for (let x = 1; x < lr.front[2] - 1; x++) P(R, lr.front[0] + x, lr.front[1] + 1, hi);
+    // sleeve: shoulder highlight
+    const sr = box(0, 16, 4, 10, 4);
+    for (let x = 1; x < sr.front[2] - 1; x++) P(R, sr.front[0] + x, sr.front[1] + 1, hi);
+    // boot: a bright cuff across the top so it reads as a separate piece from the leggings
+    const br = box(16, 16, 4, 5, 4);
+    for (const k of ['right', 'front', 'left', 'back']) {
+      for (let x = 1; x < br[k][2] - 1; x++) P(R, br[k][0] + x, br[k][1] + 1, hi);
+    }
+    return R;
+  }
+  armorSheet('armor_iron', [196, 196, 196], [232, 232, 232], [146, 146, 150], [96, 96, 100]);
+  armorSheet('armor_diamond', [92, 219, 213], [148, 240, 236], [58, 168, 166], [30, 110, 112]);
   // ---- CREEPER ----
   {
     const R = region('creeper', 64, 32);
@@ -4691,7 +4864,7 @@ class World {
     const id = this.getBlock(x, y, z);
     if (id === B.AIR) return;
     const below = this.getBlock(x, y - 1, z);
-    const needsGround = [B.SAPLING, B.DANDELION, B.POPPY, B.TALL_GRASS, B.MUSHROOM_BROWN, B.MUSHROOM_RED, B.SNOW_LAYER, B.FLOWER_POT];
+    const needsGround = [B.SAPLING, B.SPRUCE_SAPLING, B.BIRCH_SAPLING, B.DANDELION, B.POPPY, B.TALL_GRASS, B.MUSHROOM_BROWN, B.MUSHROOM_RED, B.SNOW_LAYER, B.FLOWER_POT];
     if (needsGround.includes(id) && !blockSolidTop(below, this.getData(x, y - 1, z))) return this.breakBlock(x, y, z, null, true);
     if (id === B.WHEAT_CROP && below !== B.FARMLAND) return this.breakBlock(x, y, z, null, true);
     if (id === B.SIGN && !blockSolidTop(below, this.getData(x, y - 1, z))) return this.breakBlock(x, y, z, null, true);
@@ -5822,7 +5995,7 @@ class World {
             const stage = c.data[idx];
             if (stage < 7 && Math.random() < 0.25) this.setBlock(wx, y, wz, B.WHEAT_CROP, stage + 1);
           }
-        } else if (id === B.SAPLING) {
+        } else if (IS_SAPLING(id)) {
           const wx = c.cx * 16 + lx, wz = c.cz * 16 + lz;
           if (Math.random() < 0.12 && (this.getSky(wx, y, wz) > 8 || this.getBlockLight(wx, y, wz) > 8)) {
             growTreeAt(this, wx, y, wz);
@@ -6069,25 +6242,50 @@ class World {
   }
 }
 
-// grow a tree from a sapling position (world-space, via setBlock)
+// grow a tree from a sapling position (world-space, via setBlock). Which tree comes out is
+// decided by the sapling BLOCK that is standing there, not by the caller — both callers (the
+// random tick and bonemeal) aim straight at the sapling, and reading it here means neither has
+// to know about wood types. Anything else standing there falls back to oak.
 function growTreeAt(world, x, y, z) {
+  const kind = SAPLING_KIND[world.getBlock(x, y, z)] || 'oak';
   const rng = RNG((Math.random() * 1e9) | 0);
-  const th = 4 + rng.nextInt(3);
-  // space check
-  for (let dy = 1; dy < th + 1; dy++) {
+  const th = kind === 'spruce' ? 6 + rng.nextInt(4) : (kind === 'birch' ? 5 : 4) + rng.nextInt(3);
+  // space check — the trunk column plus one above it has to be clear
+  for (let dy = 1; dy < th + 2; dy++) {
     if (Blocks[world.getBlock(x, y + dy, z)].solid) return false;
   }
-  world.setBlock(x, y, z, B.LOG);
-  for (let dy = 1; dy < th; dy++) world.setBlock(x, y + dy, z, B.LOG);
-  for (let dy = th - 3; dy <= th; dy++) {
-    const r = dy >= th - 1 ? 1 : 2;
-    for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
-      if (dx === 0 && dz === 0 && dy < th) continue;
-      if (Math.abs(dx) === r && Math.abs(dz) === r && (dy >= th - 1 || rng.chance(0.4))) continue;
-      if (world.getBlock(x + dx, y + dy, z + dz) === B.AIR) world.setBlock(x + dx, y + dy, z + dz, B.LEAVES);
+  const logB = kind === 'spruce' ? B.SPRUCE_LOG : kind === 'birch' ? B.BIRCH_LOG : B.LOG;
+  const leafB = kind === 'spruce' ? B.SPRUCE_LEAVES : kind === 'birch' ? B.BIRCH_LEAVES : B.LEAVES;
+  const leaf = (lx, ly, lz) => { if (world.getBlock(lx, ly, lz) === B.AIR) world.setBlock(lx, ly, lz, leafB); };
+  world.setBlock(x, y, z, logB);
+  for (let dy = 1; dy < th; dy++) world.setBlock(x, y + dy, z, logB);
+  if (kind === 'spruce') {
+    // conifer: skirts of leaves that pinch in and out on the way up, a spire on top.
+    // Same shape rule the terrain generator's spruces use, so a grown one matches a wild one.
+    let r = 0;
+    for (let dy = th; dy >= 2; dy--) {
+      const fromTop = th - dy;
+      if (fromTop === 0) { leaf(x, y + dy + 1, z); r = 0; }
+      else r = 1 + ((fromTop - 1) >> 1) % 3;
+      if (fromTop > 1 && (fromTop & 1) === 0) r = Math.max(1, r - 1);
+      r = Math.min(r, 3);
+      for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
+        if (dx === 0 && dz === 0 && dy < th) continue;
+        if (Math.abs(dx) === r && Math.abs(dz) === r && r > 1) continue;
+        leaf(x + dx, y + dy, z + dz);
+      }
     }
+  } else {
+    for (let dy = th - 3; dy <= th; dy++) {
+      const r = dy >= th - 1 ? 1 : 2;
+      for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
+        if (dx === 0 && dz === 0 && dy < th) continue;
+        if (Math.abs(dx) === r && Math.abs(dz) === r && (dy >= th - 1 || rng.chance(0.4))) continue;
+        leaf(x + dx, y + dy, z + dz);
+      }
+    }
+    leaf(x, y + th, z);
   }
-  world.setBlock(x, y + th, z, B.LEAVES);
   return true;
 }
 
@@ -8518,7 +8716,61 @@ const MOB_MODELS = {
 // the tamed skins, one per dye we have — registered here because WOOL_RGB lives in blocks.js
 for (const wc in WOOL_RGB) MOB_MODELS['wolf_tame_' + wc] = wolfModel('wolf_tame_' + wc);
 
-function humanoidModel(tex, armsOut) {
+// ---- worn armour ----
+// The geometry cache is keyed by MODEL NAME, so it cannot depend on what a player happens to
+// be wearing: the boxes for EVERY material are baked into the player model once, and the pose
+// function then hands a bone matrix only to the pieces actually worn. drawMob skips every box
+// whose pose slot is undefined, so an unarmoured player costs exactly what it always did.
+// Each piece is the matching body box grown by `g` pixels on every side (vanilla's armour
+// layers work the same way); uvSize keeps it sampling its own 1:1 rect on the armour sheet
+// instead of stretching off the edge. Boots sit further out than leggings so the two layers
+// can overlap on the shin without z-fighting.
+// Every piece is a CLOSED box sized to exactly the stretch of limb it covers. The first cut
+// did it the other way round — full-length limb boxes with the unwanted rows painted
+// transparent — and that left the boot as an open-topped cup: no top cap, and the inner walls
+// backface-culled, so from above you looked straight THROUGH your own foot. Do not go back to
+// hiding armour with alpha; shrink the box instead.
+// `box` is the piece's own size in pixels (also its UV footprint), `off` its corner relative to
+// the bone pivot, `g` how far it inflates past the limb on every side. Boots inflate further
+// than leggings so the two overlap at the ankle instead of z-fighting, and the leggings run the
+// FULL leg so a complete set leaves no bare shin.
+const ARMOR_PIECES = [
+  { key: 'helmet', uv: [0, 0], box: [8, 8, 8], off: [-4 / 16, 0, -4 / 16], g: 0.55, bones: [0] },
+  { key: 'chest', uv: [32, 0], box: [8, 12, 4], off: [-4 / 16, -12 / 16, -2 / 16], g: 0.6, bones: [1] },
+  { key: 'leggings', uv: [56, 0], box: [4, 12, 4], off: [-2 / 16, -12 / 16, -2 / 16], g: 0.35, bones: [4, 5] },
+  // arm box spans local y -10/16..+2/16; the sleeve takes the top 10px, leaving the hand bare
+  { key: 'sleeve', uv: [0, 16], box: [4, 10, 4], off: [-2 / 16, -8 / 16, -2 / 16], g: 0.55, bones: [2, 3] },
+  // leg box spans -12/16..0; the boot takes the bottom 5px and hangs `g` below the sole
+  { key: 'boot', uv: [16, 16], box: [4, 5, 4], off: [-2 / 16, -12 / 16, -2 / 16], g: 0.7, bones: [4, 5] },
+];
+// armour slot (0 head 1 chest 2 legs 3 feet) → which pieces it puts on the model
+const ARMOR_SLOT_PIECES = [['helmet'], ['chest', 'sleeve'], ['leggings'], ['boot']];
+function armorBoxes() {
+  const out = [];
+  for (const mat of ARMOR_MATERIALS) {
+    for (const p of ARMOR_PIECES) {
+      for (let i = 0; i < p.bones.length; i++) {
+        out.push({
+          name: 'a_' + mat + '_' + p.key + i, tex: 'armor_' + mat, uv: p.uv, uvSize: p.box,
+          size: [p.box[0] + p.g * 2, p.box[1] + p.g * 2, p.box[2] + p.g * 2],
+          off: [p.off[0] - p.g / 16, p.off[1] - p.g / 16, p.off[2] - p.g / 16],
+          bone: p.bones[i], piece: p.key, mat,
+        });
+      }
+    }
+  }
+  return out;
+}
+// index of the first armour box in a player model's box list (the 6 body boxes come first)
+const ARMOR_BOX_BASE = 6;
+// piece+bone → its offset within the armour block, resolved once instead of per frame
+const ARMOR_BOX_INDEX = {};
+{
+  const boxes = armorBoxes();
+  for (let i = 0; i < boxes.length; i++) ARMOR_BOX_INDEX[boxes[i].mat + '/' + boxes[i].piece + '/' + boxes[i].bone] = i;
+}
+
+function humanoidModel(tex, armsOut, withArmor) {
   return {
     tex, h: 1.95, w: 0.6,
     boxes: [
@@ -8528,7 +8780,8 @@ function humanoidModel(tex, armsOut) {
       { name: 'arm1', uv: [40, 16], size: [4, 12, 4], off: [-2 / 16, -10 / 16, -2 / 16] },
       { name: 'leg0', uv: [0, 16], size: [4, 12, 4], off: [-2 / 16, -12 / 16, -2 / 16] },
       { name: 'leg1', uv: [0, 16], size: [4, 12, 4], off: [-2 / 16, -12 / 16, -2 / 16] },
-    ],
+    ].concat(withArmor ? armorBoxes() : []),
+    hasArmor: !!withArmor,
     pose(e, out) {
       const sw = Math.sin(e.walkT) * clamp(e.walkAmp, 0, 1) * 0.8;
       // Crouch (remote player only — normal mobs never set e.sneak, so this is a no-op
@@ -8558,6 +8811,20 @@ function humanoidModel(tex, armsOut) {
       }
       out[4] = bonePose(e, [-2 / 16, 0.75, 0], { x: -sw });
       out[5] = bonePose(e, [2 / 16, 0.75, 0], { x: sw });
+      // worn armour rides the bones we just built — same matrix object, the box geometry
+      // already carries the offset that makes it sit outside the limb
+      if (this.hasArmor && e.armor) {
+        for (let slot = 0; slot < 4; slot++) {
+          const mat = e.armor[slot];
+          if (!mat) continue;
+          for (const piece of ARMOR_SLOT_PIECES[slot]) {
+            for (const bone of (piece === 'helmet' ? [0] : piece === 'chest' ? [1] : piece === 'sleeve' ? [2, 3] : [4, 5])) {
+              const idx = ARMOR_BOX_INDEX[mat + '/' + piece + '/' + bone];
+              if (idx !== undefined && out[bone]) out[ARMOR_BOX_BASE + idx] = out[bone];
+            }
+          }
+        }
+      }
     },
   };
 }
@@ -8651,6 +8918,11 @@ function bonePose(e, pivot, rot, scale) {
   // camera) was fine. Fixed at the source, in lookAt and friends — do NOT "fix" it here.
   Mat4.rotY(m, Math.PI - e.yaw);
   if (e.deathT > 0) Mat4.rotZ(m, Math.min(e.deathT / 0.4, 1) * Math.PI / 2 * 0.9);
+  // `lie` tips the WHOLE figure back about its own origin, before any bone pivot is applied,
+  // so a standing pose becomes a lying one with every limb still in the right place relative
+  // to the body. Sleeping in a bed is the only user; -PI/2 puts the player on their back with
+  // the head towards the model's -z (see Game.sleepFigure for where the origin is anchored).
+  if (e.lie) Mat4.rotX(m, e.lie);
   Mat4.translate(m, pivot[0], pivot[1], pivot[2]);
   if (rot.y) Mat4.rotY(m, rot.y);
   if (rot.x) Mat4.rotX(m, rot.x);
@@ -8806,8 +9078,15 @@ class Entity {
     this.vx = lerp(this.vx, ax, dt * blend);
     this.vz = lerp(this.vz, az, dt * blend);
     if (this.hitWall && this.onGround) this.vy = 9;
-    // jump up water
-    if (this.inWater) this.vy = Math.max(this.vy, 2.4);
+    // Water. The bob keeps a swimmer at the surface; the second line is what gets it OUT.
+    // The jump above is gated on onGround, which a mob floating in deep water never has, so
+    // it would paddle into the bank forever - swim at a shore and you could watch it bump the
+    // same block until it despawned. Vanilla applies the same "blocked -> jump" rule in
+    // liquid, which is what lets it climb the lip onto land.
+    if (this.inWater) {
+      this.vy = Math.max(this.vy, 2.4);
+      if (this.hitWall) this.vy = Math.max(this.vy, 5.2);
+    }
     return false;
   }
 }
@@ -8969,7 +9248,10 @@ class Arrow extends Entity {
       const bb = [p.x - 0.4, p.y - 0.1, p.z - 0.4, p.x + 0.4, p.y + 1.9, p.z + 0.4];
       const r = rayBox(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, bb);
       if (r && r.t < step && r.t < hitT) {
-        p.takeDamage(this.dmg, { x: this.x, y: this.y, z: this.z, knock: 0.6 });
+        // only a HOSTILE shot is scaled - a guest arrow hitting the host is PvP, and the
+        // room's difficulty has no business changing what one player does to another
+        const dmg = this.fromPlayer ? this.dmg : hostileDamage(this.dmg, game.difficulty);
+        if (dmg > 0) p.takeDamage(dmg, { x: this.x, y: this.y, z: this.z, knock: 0.6 });
         Sfx.play('arrowHit', { pos: [this.x, this.y, this.z] });
         this.remove();
         return;
@@ -8982,7 +9264,9 @@ class Arrow extends Entity {
         const bb = [rt.dispX - 0.4, rt.dispY - 0.1, rt.dispZ - 0.4, rt.dispX + 0.4, rt.dispY + 1.9, rt.dispZ + 0.4];
         const r = rayBox(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, bb);
         if (r && r.t < step && r.t < hitT) {
-          game.mpSendPhit(rt.pid, this.dmg, this.x, this.z, this.crit);
+          const rdmg = this.fromPlayer ? this.dmg : hostileDamage(this.dmg, game.difficulty);
+          if (rdmg <= 0) { this.remove(); return; }
+          game.mpSendPhit(rt.pid, rdmg, this.x, this.z, this.crit);
           Sfx.play('arrowHit', { pos: [this.x, this.y, this.z] });
           this.remove();
           return;
@@ -9573,7 +9857,10 @@ class HostileMob extends Mob {
       this.attackCd -= dt;
       if (d3 < this.attackRange && this.attackCd <= 0 && Math.abs(p.y - this.y) < 2.5) {
         this.attackCd = 1;
-        p.takeDamage(this.attackDmg, { x: this.x, y: this.y, z: this.z, knock: 0.8 });
+        // difficulty decides how hard it lands; 0 means peaceful, i.e. the hit does not
+        // happen at all (passing 0 on would be floored back up to 1 by takeDamage)
+        const dmg = hostileDamage(this.attackDmg, game.difficulty);
+        if (dmg > 0) p.takeDamage(dmg, { x: this.x, y: this.y, z: this.z, knock: 0.8 });
       }
       this.physics(dt);
       return true;
@@ -10444,6 +10731,7 @@ const NaturalSpawner = {
     if (this.t > 0) return;
     this.t = 1.5;
     const p = game.player;
+    const peaceful = game.difficulty === 'peaceful';
     let hostiles = 0, passives = 0, squids = 0, wolves = 0;
     for (const e of world.entities) {
       if (e.dead) continue;
@@ -10458,9 +10746,12 @@ const NaturalSpawner = {
       // must never be culled, however far it has been left behind
       const far = Math.hypot(e.x - p.x, e.z - p.z) > 110;
       if (far && ((e instanceof HostileMob && e.type !== 'blaze') || e.type === 'squid' || (e.type === 'wolf' && !e.tamed))) e.remove();
+      // Peaceful clears hostiles wherever they are, not just the far ones. The dragon is a
+      // boss the player went looking for, so it is left alone - vanilla keeps it too.
+      if (peaceful && e instanceof HostileMob && e.type !== 'dragon') e.remove();
     }
     const cap = world.dim === 'end' ? 16 : 14;
-    if (hostiles < cap) {
+    if (!peaceful && hostiles < cap) {
       for (let i = 0; i < 6; i++) {
         const a = Math.random() * Math.PI * 2;
         const d = 26 + Math.random() * 40;
@@ -10831,6 +11122,10 @@ class Player {
     // freeze movement input while an inventory/container screen or chat is open
     const uiOpen = (typeof UI !== 'undefined' && UI.screen !== 'none') || (typeof Chat !== 'undefined' && Chat.open);
     const K = uiOpen ? NO_KEYS : this.keys;
+    // last chance for a mod to rewrite the movement input, before anything reads it. Never
+    // while a menu is up — K is the shared NO_KEYS constant then, and writing to it would
+    // leak into every later frame.
+    if (!uiOpen && typeof Mods !== 'undefined' && Mods.active.length) Mods.keys(K, dt);
     // Touch joystick supplies an analog vector (Mobile.applyStick); the keyboard stays digital.
     const an = uiOpen ? null : this.moveAnalog;
     // sneaking / sprinting
@@ -11038,6 +11333,17 @@ class Player {
       this.voidT = (this.voidT || 0) - dt;
       if (this.voidT <= 0) { this.voidT = 0.5; this.takeDamage(4, null, true, true); }
     }
+    // Peaceful: vanilla regenerates your health and refills the food bar for you, so the
+    // exhaustion book-keeping below never gets to bite. Creative already ignores exhaustion
+    // (addExhaustion is a no-op there), this is the survival-on-peaceful case.
+    if (this.game.difficulty === 'peaceful') {
+      this.peaceT = (this.peaceT || 0) + dt;
+      if (this.peaceT >= 1) {
+        this.peaceT = 0;
+        if (this.hp < this.maxHp) this.heal(1);
+        if (this.hunger < 20) this.hunger++;
+      }
+    }
     // hunger / regen
     if (this.exhaustion >= 4) {
       this.exhaustion -= 4;
@@ -11054,9 +11360,15 @@ class Player {
       this.regenT += dt;
       if (this.regenT >= 4) { this.regenT = 0; this.heal(1); this.addExhaustion(3); }
     } else this.regenT = 0;
+    // Starvation. How far it may take you down is the difficulty's call: peaceful never
+    // starves you, easy stops at 10, normal at 1 (what this always did), hard kills.
     if (this.hunger <= 0) {
-      this.starveT += dt;
-      if (this.starveT >= 4) { this.starveT = 0; if (this.hp > 1) this.takeDamage(1, null, true); }
+      const floorHp = STARVE_FLOOR[this.game.difficulty];
+      if (floorHp === null) this.starveT = 0;
+      else {
+        this.starveT += dt;
+        if (this.starveT >= 4) { this.starveT = 0; if (this.hp > floorHp) this.takeDamage(1, null, true); }
+      }
     }
     // eating
     if (this.eating > 0) {
@@ -11682,7 +11994,7 @@ class Player {
         this.useCd = USE_REPEAT; this.swingNow();
         return;
       }
-      if (id === B.SAPLING) {
+      if (IS_SAPLING(id)) {
         if (growTreeAt(w, hit.x, hit.y, hit.z)) {
           Particles.burst('happy', hit.x + 0.5, hit.y + 1, hit.z + 0.5, 10);
           this.consumeHeld();
@@ -11841,6 +12153,17 @@ class Player {
         if (e.type === 'item' || e.type === 'xp' || e.type === 'arrow' || e.dead) continue;
         if (e.x + e.w / 2 > bb[0] && e.x - e.w / 2 < bb[3] && e.y + e.h > bb[1] && e.y < bb[4] && e.z + e.w / 2 > bb[2] && e.z - e.w / 2 < bb[5]) return;
       }
+      // OTHER PLAYERS. A remote is NOT a world entity — it lives in Game.remotes and only gets
+      // a proxy object when a mob decides to chase it — so the loop above never saw one and you
+      // could wall a friend inside a block. Vanilla blocks placement against every player.
+      const G = this.game;
+      if (G && G.remotes) {
+        for (const r of G.remotes.values()) {
+          if (!r.seen || r.dead) continue;
+          if (r.dispX + 0.3 > bb[0] && r.dispX - 0.3 < bb[3] && r.dispY + 1.8 > bb[1] && r.dispY < bb[4]
+            && r.dispZ + 0.3 > bb[2] && r.dispZ - 0.3 < bb[5]) return;
+        }
+      }
     }
     let data = 0;
     const facing = this.getFacing();
@@ -11861,7 +12184,7 @@ class Player {
       }
       if (data === 0 && !blockSupportsTorch(w.getBlock(px, py - 1, pz), w.getData(px, py - 1, pz))) return;
     }
-    if (bid === B.SAPLING || bid === B.DANDELION || bid === B.POPPY || bid === B.MUSHROOM_BROWN || bid === B.MUSHROOM_RED) {
+    if (IS_SAPLING(bid) || bid === B.DANDELION || bid === B.POPPY || bid === B.MUSHROOM_BROWN || bid === B.MUSHROOM_RED) {
       const below = w.getBlock(px, py - 1, pz);
       if (below !== B.GRASS && below !== B.DIRT && below !== B.FARMLAND && below !== B.GRASS_SNOW) return;
     }
@@ -12441,6 +12764,13 @@ const Music = {
 'use strict';
 // ============ ui.js — HUD + all screens (2D canvas overlay) ============
 
+// one line per difficulty for the world-creation screen
+const DIFFICULTY_BLURB = {
+  peaceful: 'No hostile mobs. Health and hunger refill on their own',
+  easy: 'Hostile mobs spawn. Starving stops at five hearts',
+  normal: 'Hostile mobs spawn. Starving stops at half a heart',
+  hard: 'Hostile mobs spawn. Starving will kill you',
+};
 const UI = {
   canvas: null, ctx: null, scale: 2,
   screen: 'none', // none|inventory|crafting|furnace|chest|pause|options|controls
@@ -12456,6 +12786,7 @@ const UI = {
   mpCode: '', mpFocus: 'code',
   mpNotice: '', // why we're back on the join screen (host quit, connection lost...)
   creativeScroll: 0, creativeItems: null,
+  createDifficulty: 'normal',
   signBE: null, signLine: 0, signLineRects: null,   // sign editor state
   toasts: [], messages: [],
   itemNameT: 0, itemNameTxt: '',
@@ -12485,6 +12816,13 @@ const UI = {
   text(t, x, y, color = '#FFFFFF', shadow = true) { Font.draw(this.ctx, t, x * this.scale, y * this.scale, color, this.scale, shadow); },
   textC(t, cx, y, color = '#FFFFFF', shadow = true) { Font.drawCentered(this.ctx, t, cx * this.scale, y * this.scale, color, this.scale, shadow); },
   textScaled(t, x, y, color, mult, shadow = true) { Font.draw(this.ctx, t, x * this.scale, y * this.scale, color, this.scale * mult, shadow); },
+  // trim to fit `maxW` UI pixels, ellipsis only when something actually had to go
+  fit(t, maxW) {
+    t = String(t == null ? '' : t);
+    if (Font.width(t) <= maxW) return t;
+    while (t.length && Font.width(t + '...') > maxW) t = t.slice(0, -1);
+    return t + '...';
+  },
   icon(id, x, y) {
     const cv = Tex.icons[id];
     if (!cv) return;
@@ -12503,6 +12841,20 @@ const UI = {
       this.rect(x + 2, y + 14, 12, 1, '#000000');
       this.rect(x + 2, y + 14, Math.max(1, 12 * f), 1, f > 0.5 ? '#3fbf3f' : f > 0.25 ? '#bfbf3f' : '#bf3f3f');
     }
+  },
+  // Sleeping: vanilla fades the screen to black on the way into the morning and back out of
+  // it, and tells you what it is waiting for. Singleplayer runs the fade (Game.sleepSkip counts
+  // down to the time jump, sleepWake counts back out); multiplayer holds at a light dim while
+  // the room waits for everyone to get into a bed, since that can take a while.
+  drawSleep(game) {
+    let a = 0;
+    if (game.sleepSkip > 0) a = clamp((1.6 - game.sleepSkip) / 0.9, 0, 1);
+    else if (game.sleepWake > 0) a = clamp(game.sleepWake / 0.7, 0, 1);
+    else if (game.sleeping) a = 0.55;
+    if (a <= 0) return;
+    const W = this.W(), H = this.H();
+    this.rect(0, 0, W, H, 'rgba(0,0,0,' + a.toFixed(3) + ')');
+    if (game.sleepSkip > 0) this.textC('Sleeping...', W / 2, H * 0.55, '#ffffff');
   },
   panel(x, y, w, h) {
     // MC dialog: gray with 3D edges
@@ -12573,6 +12925,8 @@ const UI = {
   openFurnace(be) { this.screen = 'furnace'; this.furnaceBE = be; Game.releasePointer(); },
   openChest(be, large) { this.screen = 'chest'; this.chestBE = be; this.chestLarge = !!large; Game.releasePointer(); },
   closeScreen() {
+    // a confirm dialog opened from Options goes BACK to Options, and owns nothing to tear down
+    if (this.screen === 'difflock') { this.screen = 'options'; return; }
     // the sign editor has its own teardown (commit the text + remesh + tell the room)
     if (this.screen === 'sign') { Game.closeSign(); if (Game.state === 'play') Game.requestPointer(); return; }
     // creative: items are infinite, so just drop whatever is on the cursor
@@ -12831,9 +13185,10 @@ const UI = {
     if (Game.state === 'title') return this.clickButtons();
     if (Game.state === 'create') return this.clickButtons();
     if (Game.state === 'mp') return this.clickButtons();
+    if (Game.state === 'mods') return this.clickButtons();
     if (Game.state === 'worlds') return this.clickButtons();
     if (Game.state === 'dead' || Game.state === 'win') return this.clickButtons();
-    if (this.screen === 'pause' || this.screen === 'options' || this.screen === 'controls') {
+    if (this.screen === 'pause' || this.screen === 'options' || this.screen === 'controls' || this.screen === 'difflock') {
       this.clickSliders();
       return this.clickButtons();
     }
@@ -12934,12 +13289,15 @@ const UI = {
     if (game.state === 'worlds') return this.drawWorlds(game);
     if (game.state === 'create') return this.drawCreate(game);
     if (game.state === 'mp') return this.drawMultiplayer(game);
+    if (game.state === 'mods') return this.drawMods(game);
     if (game.state === 'loading') return this.drawLoading(game);
     if (game.state === 'win') return this.drawCredits(game, dt);
     if (game.state === 'play' || game.state === 'dead') {
       this.drawOverlays(game);
       if (game.remotes && game.remotes.size) this.drawRemoteNametags(game);
       if (this.screen === 'none' && game.state === 'play') this.drawHUD(game, dt);
+      if (typeof Mods !== 'undefined' && Mods.active.length) Mods.draw(this);
+      this.drawSleep(game);
       if (game.showDebug) this.drawF3(game);
       this.drawMessages(dt);
       this.drawToasts(dt);
@@ -12948,6 +13306,7 @@ const UI = {
       if (this.screen === 'pause') return this.drawPause(game);
       if (this.screen === 'options') return this.drawOptions(game);
       if (this.screen === 'controls') return this.drawControls(game);
+      if (this.screen === 'difflock') return this.drawDiffLock(game);
       if (this.screen === 'inventory' || this.screen === 'crafting') return this.drawContainer(game);
       if (this.screen === 'furnace') return this.drawFurnace(game);
       if (this.screen === 'chest') return this.drawChest(game);
@@ -13049,8 +13408,8 @@ const UI = {
       }
     }
     // sleeping: every player must be in a bed before the night is skipped
-    if (game.sleeping) {
-      this.textC('Sleeping (' + game.mpSleepCount() + '/' + game.mpPlayerCount() + ') — move to get up', cx, H * 0.42, '#ffff99');
+    if (game.sleeping && game.sleepSkip <= 0) {
+      this.textC('Sleeping (' + game.mpSleepCount() + '/' + game.mpPlayerCount() + ') - move to get up', cx, H * 0.42, '#ffff99');
     }
     // crosshair (inverted). Both arms go in ONE fill() so the overlapping centre
     // pixel is differenced exactly once (no stray dark dot). Both rects share the same
@@ -13404,6 +13763,8 @@ const UI = {
     by += 24;
     this.button('multiplayer_menu', bx, by, 200, 'Multiplayer...');
     by += 24;
+    this.button('mods_menu', bx, by, 200, 'Mods...');
+    by += 24;
     this.button('options_title', bx, by, 200, 'Options...');
     this.text('Minecraft JS Edition', 2, H - 10, '#ffffff');
     this.text('A tribute recreation', W - Font.width('A tribute recreation') - 2, H - 10, '#ffffff');
@@ -13454,6 +13815,8 @@ const UI = {
     this.button('worlds_back', W / 2 + 2, by + 24, 150, 'Cancel');
   },
   drawCreate(game) {
+    // one line each, kept short enough not to wrap at the narrowest UI scale
+
     this.dirtBg();
     const W = this.W(), H = this.H();
     this.textC('Create New World', W / 2, H * 0.12);
@@ -13475,7 +13838,10 @@ const UI = {
     this.textC(this.createMode === 'creative'
       ? 'Unlimited blocks, flying and instant breaking'
       : 'Search for resources, craft, gain levels', W / 2, H * 0.24 + 116, '#808080');
-    const cby = Math.max(H * 0.62, H * 0.24 + 132);
+    const dif = this.createDifficulty || 'normal';
+    this.button('create_difficulty', W / 2 - 100, H * 0.24 + 130, 200, 'Difficulty: ' + DIFFICULTY_LABEL[dif]);
+    this.textC(DIFFICULTY_BLURB[dif], W / 2, H * 0.24 + 154, '#808080');
+    const cby = Math.max(H * 0.62, H * 0.24 + 170);
     this.button('create_go', W / 2 - 100, cby, 200, 'Create New World');
     this.button('create_back', W / 2 - 100, cby + 24, 200, 'Cancel');
   },
@@ -13530,6 +13896,57 @@ const UI = {
     this.textC('To host your own world: open it, then Pause -> Host', W / 2, H * 0.72, '#909090');
     this.button('mp_back', W / 2 - 100, H - 30, 200, 'Back');
   },
+  // Every .js file found in the mods/ folder, each with its own ON/OFF. The list is whatever
+  // Mods.scan() discovered — this screen never knows the name of any particular mod.
+  drawMods(game) {
+    this.dirtBg();
+    const W = this.W(), H = this.H();
+    this.textC('Mods', W / 2, 8);
+    const M = (typeof Mods !== 'undefined') ? Mods : null;
+    const lw = Math.min(300, W - 20);
+    const lx = W / 2 - lw / 2;
+    let y = 22;
+    // why you landed here, when a host bounced you for a mod you don't have
+    if (this.modsNotice) {
+      this.textC(this.fit(this.modsNotice, W - 8), W / 2, y, '#ffaa00'); y += 11;
+      if (this.modsNotice2) { this.textC(this.fit(this.modsNotice2, W - 8), W / 2, y, '#c0c0c0'); y += 11; }
+      y += 3;
+    }
+    const list = M ? M.available : [];
+    const fy = H - 52;
+    const maxRows = Math.max(1, floor((fy - y - 12) / 30));
+    if (M && M.status === 'scanning' && !list.length) {
+      this.textC('Looking for mods...', W / 2, H * 0.4, '#a0a0a0');
+    } else if (!list.length) {
+      this.textC('No mods installed', W / 2, H * 0.36, '#ffffff');
+      this.textC('Put a .js file in the mods/ folder', W / 2, H * 0.36 + 12, '#a0a0a0');
+      if (M && M.error) this.textC(this.fit(M.error, W - 8), W / 2, H * 0.36 + 26, '#ff8080');
+    } else {
+      for (const e of list.slice(0, maxRows)) {
+        const on = e.ok && M.isEnabled(e.id);
+        const hover = this.mx >= lx && this.mx < lx + lw && this.my >= y && this.my < y + 28;
+        this.rect(lx, y, lw, 28, hover ? 'rgba(30,30,30,0.75)' : 'rgba(0,0,0,0.6)');
+        if (on) {
+          this.rect(lx - 1, y - 1, lw + 2, 1, '#55ff55'); this.rect(lx - 1, y + 28, lw + 2, 1, '#55ff55');
+          this.rect(lx - 1, y - 1, 1, 30, '#55ff55'); this.rect(lx + lw, y - 1, 1, 30, '#55ff55');
+        }
+        const tw = lw - 62;
+        this.text(this.fit(e.name, tw), lx + 4, y + 4, e.ok ? '#ffffff' : '#ff8080');
+        this.text(this.fit(e.error || e.description || e.file, tw), lx + 4, y + 15, e.ok ? '#909090' : '#ff8080');
+        if (e.ok) {
+          this.button('mod_toggle_' + e.id, lx + lw - 54, y + 7, 50, on ? 'ON' : 'OFF', true);
+          // the whole row toggles too (same id, so whichever the click lands on is the same
+          // action) — a 50px button is a mean target on a phone
+          this.buttons.push({ id: 'mod_toggle_' + e.id, x: lx, y, w: lw, h: 28 });
+        }
+        y += 30;
+      }
+      if (list.length > maxRows) this.textC('+' + (list.length - maxRows) + ' more (window too short)', W / 2, y + 2, '#909090');
+    }
+    if (M && M.source) this.textC(this.fit('found via ' + M.source, W - 8), W / 2, fy - 11, '#707070');
+    this.button('mods_reload', W / 2 - 152, fy, 150, (M && M.status === 'scanning') ? 'Scanning...' : 'Reload');
+    this.button('mods_back', W / 2 + 2, fy, 150, 'Back');
+  },
   drawLoading(game) {
     this.dirtBg();
     const W = this.W(), H = this.H();
@@ -13570,6 +13987,16 @@ const UI = {
     // to save here, so "Leave Game" above is their only way out
     if (!game.isGuest) this.button('quit', bx, y, 200, 'Save and Quit to Title');
   },
+  // Locking difficulty is one-way in vanilla, so it asks first.
+  drawDiffLock(game) {
+    this.dimBg(0.7);
+    const W = this.W(), H = this.H();
+    this.textC('Lock Difficulty?', W / 2, H * 0.3);
+    this.textC('This world will stay on ' + DIFFICULTY_LABEL[game.difficulty] + ' forever.', W / 2, H * 0.4, '#c8c8c8');
+    this.textC('This cannot be undone.', W / 2, H * 0.46, '#ff8080');
+    this.button('difflock_yes', W / 2 - 100, H * 0.56, 200, 'Lock it');
+    this.button('difflock_no', W / 2 - 100, H * 0.56 + 24, 200, 'Cancel');
+  },
   drawOptions(game) {
     this.dimBg(0.6);
     if (Game.state === 'title') this.dirtBg();
@@ -13597,7 +14024,28 @@ const UI = {
     if (tOn) this.button('touch_edit', bx + 160, H * 0.25 + 80, 150, 'Edit Touch Layout...');
     else if (typeof Mobile !== 'undefined' && Mobile.touchDevice)
       this.textC('Off = keyboard/mouse mode. The pause button stays tappable.', W / 2, H * 0.25 + 104, '#c8c8c8');
+    // Difficulty. A guest never sets the room's rules - they see the host's value greyed out
+    // rather than having the control disappear, so it is obvious what is being played on.
+    const dy = H * 0.25 + 108;
+    const locked = game.difficultyLocked, guest = game.isGuest && Net.connected;
+    const dLabel = 'Difficulty: ' + DIFFICULTY_LABEL[game.difficulty];
+    // The second slot carries the WHY, so the value itself stays short enough for a 150px
+    // button at every UI scale. A guest has to be able to see that it is locked, not just
+    // that it is the host's - both facts together will not fit on one button.
+    if (guest || locked) this.buttonDisabled(bx, dy, 150, dLabel);
+    else this.button('difficulty', bx, dy, 150, dLabel);
+    if (guest) this.buttonDisabled(bx + 160, dy, 150, locked ? 'Locked by host' : 'Set by host');
+    else if (locked) this.buttonDisabled(bx + 160, dy, 150, 'Difficulty Locked');
+    else this.button('difficulty_lock', bx + 160, dy, 150, 'Lock Difficulty...');
     this.button('options_done', W / 2 - 100, H * 0.78, 200, 'Done');
+  },
+  // same shape as button() but greyed and NOT registered as clickable
+  buttonDisabled(x, y, w, label) {
+    const h = 20;
+    this.rect(x, y, w, h, '#4a4a4a');
+    this.rect(x, y, w, 1, '#6a6a6a'); this.rect(x, y, 1, h, '#6a6a6a');
+    this.rect(x, y + h - 1, w, 1, '#2f2f2f'); this.rect(x + w - 1, y, 1, h, '#2f2f2f');
+    this.textC(label, x + w / 2, y + (h - 8) / 2 + 1, '#9a9a9a');
   },
   // sign editor: four lines, the one being typed is highlighted with a blinking caret.
   // Tapping a line on a phone selects it (the soft keyboard stays up the whole time).
@@ -14235,6 +14683,394 @@ if (typeof document !== 'undefined') {
 </script>
 <script>
 'use strict';
+// ============ mods.js — the mods/ folder: discovery, loading, on/off, room handshake ============
+//
+// Mods live OUTSIDE the game. js/*.js IS the game and gets inlined into the single-file
+// bundle; mods/*.js never are. Dropping a .js file into mods/ is the whole install step —
+// the loader finds it on its own and it appears in the title screen's "Mods..." list.
+//
+// Finding the files is the only awkward part, because a static host has no directory
+// listing. Three sources are tried in turn, first non-empty answer wins:
+//   1. mods/            — a real readdir. The dev server (server.js) answers it with JSON.
+//   2. the GitHub API   — /repos/<owner>/<repo>/contents/mods, with owner+repo derived from
+//                         the page's own github.io URL, so nothing is hard-coded and nothing
+//                         needs regenerating after a mod is uploaded. This is the source that
+//                         makes "put the file on GitHub, done" actually work.
+//   3. mods/index.json  — a plain list of filenames, written by build.cjs.
+// The answer is cached in localStorage for CACHE_MS, so the unauthenticated GitHub rate
+// limit (60/hour) is never a problem; "Reload" in the menu bypasses the cache.
+//
+// A mod file is a classic script (no modules, like the rest of the game) whose only job is
+// to call Mods.register({...}) exactly once. Registering must have NO side effects: EVERY
+// discovered file is loaded so the menu can show a name and description, but only the ones
+// switched ON are ever run.
+//
+// Hooks a mod may define (all optional, all called with `api` first — see api()):
+//   onEnable/onDisable  — switched on/off in the menu, or torn down by a Reload
+//   onTick(api, dt)     — every frame while in play
+//   onKeys(api, K, dt)  — just before the movement code reads them; may rewrite K in place
+//   onDraw(api, ui)     — HUD drawing, after the normal HUD
+//   onNet(api, d, from) — a packet another player's copy of THIS mod sent via api.send()
+//   onRoundStart/onRoundEnd(api, d) — for round-based mods; a mod drives these itself
+// Anything a hook throws disables that one mod instead of killing the frame.
+
+const Mods = {
+  CACHE_MS: 5 * 60 * 1000,
+  DIR: 'mods/',
+  LS_ENABLED: 'mcpe_mods',
+  LS_CACHE: 'mcpe_mods_list',
+
+  available: [],      // [{id,name,description,file,ok,error}] — everything found in mods/
+  registry: {},       // id -> the object the mod file registered
+  enabledIds: [],     // ids switched ON (persisted; may name a mod that isn't installed yet)
+  active: [],         // registered AND enabled — what actually runs
+  status: 'idle',     // idle|scanning|ready|error
+  source: '',         // which discovery source answered, for the menu's footer
+  error: '',
+  roomMods: null,     // guest: the ids the host announced in the world snapshot
+  _scan: null,        // in-flight scan promise (scan() is safe to call from anywhere)
+  _loadingFile: null, // set while a mod file's <script> executes — see register()
+  _loaded: {},        // file -> true, so a re-scan doesn't re-execute the same script
+  _apis: {},          // per-mod api object, built once
+  _bust: 0,           // cache-buster stamped on the <script> src
+
+  init() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(this.LS_ENABLED));
+      if (Array.isArray(raw)) this.enabledIds = raw.map(String);
+    } catch (e) {}
+    this.scan();
+  },
+
+  // ---------- on/off ----------
+  isEnabled(id) { return this.enabledIds.indexOf(id) >= 0; },
+  setEnabled(id, on) {
+    const i = this.enabledIds.indexOf(id);
+    if (on && i < 0) this.enabledIds.push(id);
+    else if (!on && i >= 0) this.enabledIds.splice(i, 1);
+    else return;
+    this.saveEnabled();
+    this.rebuildActive();
+  },
+  toggle(id) { this.setEnabled(id, !this.isEnabled(id)); },
+  saveEnabled() {
+    try { localStorage.setItem(this.LS_ENABLED, JSON.stringify(this.enabledIds)); } catch (e) {}
+  },
+  entry(id) {
+    for (const e of this.available) if (e.id === id) return e;
+    return null;
+  },
+
+  // `active` is rebuilt from scratch rather than patched, so enable, disable and reload all
+  // take one path. onEnable/onDisable only fire on a real transition.
+  rebuildActive() {
+    const was = this.active.slice();
+    const now = [];
+    for (const e of this.available) {
+      if (!e.ok || !this.isEnabled(e.id)) continue;
+      const m = this.registry[e.id];
+      if (m) now.push(m);
+    }
+    this.active = now;
+    for (const m of was) if (now.indexOf(m) < 0) this._call(m, 'onDisable');
+    for (const m of now) if (was.indexOf(m) < 0) this._call(m, 'onEnable');
+    this.purgeUnknownStacks();
+  },
+
+  // A mod switched off takes its items with it, and a stack still sitting in the hotbar that
+  // names an id nothing defines any more throws in drawViewModel on EVERY frame — measured at
+  // ~285 exceptions a second while holding one. `fixStack` already knows how to drop an
+  // unknown id (it is what repairs a loaded save), so the live inventory goes through the same
+  // door whenever the active set changes. Cheap: ~45 slots.
+  purgeUnknownStacks() {
+    if (typeof fixStack !== 'function') return;
+    const p = (typeof Game !== 'undefined') ? Game.player : null;
+    if (p && p.inventory) {
+      const inv = p.inventory;
+      if (Array.isArray(inv.slots)) for (let i = 0; i < inv.slots.length; i++) inv.slots[i] = fixStack(inv.slots[i]);
+      if (Array.isArray(inv.armor)) for (let i = 0; i < inv.armor.length; i++) inv.armor[i] = fixStack(inv.armor[i]);
+    }
+    if (typeof UI !== 'undefined') {
+      if (UI.cursorStack) UI.cursorStack = fixStack(UI.cursorStack);
+      if (Array.isArray(UI.craftGrid)) for (let i = 0; i < UI.craftGrid.length; i++) UI.craftGrid[i] = fixStack(UI.craftGrid[i]);
+    }
+  },
+
+  // ---------- what a mod file calls ----------
+  register(def) {
+    if (!def || typeof def !== 'object') { console.warn('[mods] register() needs an object'); return; }
+    const file = this._loadingFile;
+    const id = String(def.id || (file || '').replace(/\.js$/i, '')).trim();
+    if (!id) { console.warn('[mods] register() without an id and without a filename'); return; }
+    def.id = id;
+    def.name = def.name || id;
+    def.description = def.description || '';
+    def.file = file || (id + '.js');
+    this.registry[id] = def;
+    delete this._apis[id];   // a reloaded file gets a fresh api bound to the new object
+  },
+
+  // ---------- what a mod is handed ----------
+  // Getters throughout, so a mod that stashes this object still sees the current world and
+  // player after a respawn, a dimension change or joining somebody else's room.
+  api(m) {
+    const cached = this._apis[m.id];
+    if (cached) return cached;
+    const id = m.id;
+    const a = {
+      id,
+      game: (typeof Game !== 'undefined') ? Game : null,
+      ui: (typeof UI !== 'undefined') ? UI : null,
+      net: (typeof Net !== 'undefined') ? Net : null,
+      get world() { return Game.world; },
+      get player() { return Game.player; },
+      get remotes() { return Game.remotes; },
+      get pid() { return (typeof Net !== 'undefined') ? Net.pid : null; },
+      get isHost() { return Game.mpRole === 'host'; },
+      get isGuest() { return !!Game.isGuest; },
+      get inRoom() { return typeof Net !== 'undefined' && Net.connected; },
+      // broadcast to the room (or `to` = one pid). Lands in the same mod's onNet everywhere.
+      send(data, to) { Mods.send(id, data, to); },
+      msg(text, color) { if (typeof UI !== 'undefined' && UI.msg) UI.msg(text, color); },
+    };
+    this._apis[id] = a;
+    return a;
+  },
+
+  // ---------- dispatch ----------
+  // .slice() on every loop: a hook that throws is spliced out of `active` by fail(), which
+  // would otherwise skip the next mod in the iteration.
+  _call(m, hook, a, b) {
+    const fn = m && m[hook];
+    if (typeof fn !== 'function') return undefined;
+    try { return fn.call(m, this.api(m), a, b); }
+    catch (err) { this.fail(m, hook, err); return undefined; }
+  },
+  fail(m, hook, err) {
+    const i = this.active.indexOf(m);
+    if (i >= 0) this.active.splice(i, 1);
+    const j = this.enabledIds.indexOf(m.id);
+    if (j >= 0) { this.enabledIds.splice(j, 1); this.saveEnabled(); }
+    const e = this.entry(m.id);
+    if (e) { e.ok = false; e.error = hook + '(): ' + ((err && err.message) || err); }
+    console.error('[mods] ' + m.id + '.' + hook + ' threw - mod switched off', err);
+    if (typeof UI !== 'undefined' && UI.msg) UI.msg('Mod "' + (m.name || m.id) + '" crashed - switched off', '#ff5555');
+  },
+  tick(dt) { for (const m of this.active.slice()) this._call(m, 'onTick', dt); },
+  keys(K, dt) { for (const m of this.active.slice()) this._call(m, 'onKeys', K, dt); },
+  draw(ui) { for (const m of this.active.slice()) this._call(m, 'onDraw', ui); },
+  roundStart(d) { for (const m of this.active.slice()) this._call(m, 'onRoundStart', d); },
+  roundEnd(d) { for (const m of this.active.slice()) this._call(m, 'onRoundEnd', d); },
+
+  // ---------- the relay channel ----------
+  // One message type for every mod: {m:<mod id>, d:<payload>}. The payload is NESTED because
+  // `t`, `to` and `from` at the top level belong to Net.send and the relay, which stamp over
+  // whatever was there — a mod must not have to know that.
+  send(id, data, to) {
+    if (typeof Net === 'undefined' || !Net.connected) return;
+    Net.send('mod', { m: id, d: (data == null ? {} : data) }, to);
+  },
+  onNet(msg) {
+    if (!msg || !msg.m) return;
+    for (const m of this.active.slice()) if (m.id === msg.m) this._call(m, 'onNet', msg.d || {}, msg.from);
+  },
+
+  // ---------- room handshake ----------
+  // Sorted, so both ends compare the same list whatever order they loaded in.
+  activeIds() { return this.active.map((m) => m.id).sort(); },
+  labelFor(id) {
+    const m = this.registry[id];
+    if (m && m.name) return m.name;
+    const e = this.entry(id);
+    return (e && e.name) || id;
+  },
+  labelsFor(ids) { return (ids || []).map((id) => this.labelFor(id)); },
+  // Which of `theirs` we are not running. Used by the host against a guest's `hello`, and by
+  // the guest to explain a modkick. "Not running" covers both never installed and installed
+  // but switched off — the fix is the same screen either way.
+  missing(theirs) {
+    const have = this.activeIds();
+    return (Array.isArray(theirs) ? theirs : []).filter((id) => have.indexOf(id) < 0);
+  },
+  // installed but switched off — the menu says "switch it on" instead of "download it"
+  isInstalled(id) {
+    const e = this.entry(id);
+    return !!(e && e.ok);
+  },
+
+  // ---------- discovery ----------
+  // owner/repo/path straight out of the page URL, so this never has to be configured and
+  // keeps working if the repo is renamed or forked.
+  ghRepo() {
+    const h = location.hostname || '';
+    if (!/\.github\.io$/i.test(h)) return null;
+    const owner = h.replace(/\.github\.io$/i, '');
+    const seg = location.pathname.split('/').filter(Boolean);
+    // project page (owner.github.io/repo/...) vs user page (owner.github.io/...), where the
+    // first segment is a file rather than the repo name
+    const isRepoSeg = seg.length > 0 && !/\.[a-z0-9]+$/i.test(seg[0]);
+    const repo = isRepoSeg ? seg[0] : h;
+    let dirPath = location.pathname.replace(/[^/]*$/, '');   // the page's own directory
+    if (isRepoSeg) dirPath = dirPath.replace('/' + repo, '');
+    const path = (dirPath + 'mods').replace(/^\/+/, '').replace(/\/{2,}/g, '/');
+    return { owner, repo, path };
+  },
+
+  async _fetchJSON(url, opts) {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  },
+  // accepts ["a.js",...] (readdir) | [{name,type},...] (GitHub API) | {mods|files:[...]}
+  _namesFrom(data) {
+    let list = data;
+    if (list && !Array.isArray(list)) list = list.mods || list.files || null;
+    if (!Array.isArray(list)) return null;
+    const out = [];
+    for (const it of list) {
+      const name = (typeof it === 'string') ? it : (it && it.type !== 'dir' ? it.name : null);
+      if (name && /\.js$/i.test(name)) out.push(name);
+    }
+    return out;
+  },
+
+  scan(force) {
+    if (this._scan) return this._scan;
+    this.status = 'scanning';
+    this.error = '';
+    const done = () => { this._scan = null; return this.available; };
+    this._scan = this._doScan(!!force).then(done, (e) => {
+      this._scan = null;
+      this.status = 'error';
+      this.error = (e && e.message) || String(e);
+      console.error('[mods] scan failed', e);
+      return this.available;
+    });
+    return this._scan;
+  },
+
+  async _doScan(force) {
+    if (force) this._reset();
+    let files = null, src = '';
+    if (!force) {
+      const c = this._readCache();
+      if (c) { files = c.files; src = c.src; this._bust = c.t; }
+    }
+    if (!files) {
+      const tried = [];
+      // 1. a real directory listing — server.js answers mods/ with JSON
+      try {
+        const n = this._namesFrom(await this._fetchJSON(this.DIR, { cache: 'no-store' }));
+        if (n) { files = n; src = 'mods/ listing'; }
+      } catch (e) { tried.push('listing: ' + e.message); }
+      // 2. the GitHub API — what makes "upload the file and you're done" work on Pages
+      if (!files) {
+        const gh = this.ghRepo();
+        if (!gh) tried.push('github: not a github.io page');
+        else {
+          try {
+            const url = 'https://api.github.com/repos/' + gh.owner + '/' + gh.repo + '/contents/' + gh.path;
+            const n = this._namesFrom(await this._fetchJSON(url, { headers: { Accept: 'application/vnd.github+json' } }));
+            if (n) { files = n; src = 'github:' + gh.owner + '/' + gh.repo; }
+          } catch (e) { tried.push('github: ' + e.message); }
+        }
+      }
+      // 3. the manifest build.cjs writes
+      if (!files) {
+        try {
+          const n = this._namesFrom(await this._fetchJSON(this.DIR + 'index.json', { cache: 'no-store' }));
+          if (n) { files = n; src = 'index.json'; }
+        } catch (e) { tried.push('index.json: ' + e.message); }
+      }
+      if (!files) {
+        // Not an error worth shouting about: it is also what an empty install looks like
+        // from file://, where fetch is blocked outright.
+        this.available = [];
+        this.source = '';
+        this.status = 'error';
+        this.error = (location.protocol === 'file:')
+          ? 'Mods need the game served over http (file:// blocks them)'
+          : 'Could not read the mods folder';
+        console.warn('[mods] no discovery source answered:\n  ' + tried.join('\n  '));
+        this.rebuildActive();
+        return this.available;
+      }
+      this._bust = Date.now();
+      this._writeCache(src, files);
+    }
+    this.source = src;
+    await this._loadAll(files);
+    this.status = 'ready';
+    this.rebuildActive();
+    return this.available;
+  },
+
+  _reset() {
+    for (const m of this.active.slice()) this._call(m, 'onDisable');
+    this.active = [];
+    this.registry = {};
+    this._apis = {};
+    this._loaded = {};
+    this.available = [];
+    this._bust = Date.now();
+  },
+
+  async _loadAll(files) {
+    const list = [];
+    for (const file of files) {
+      const fallbackId = file.replace(/\.js$/i, '');
+      if (!this._loaded[file]) {
+        const ok = await this._loadFile(file);
+        this._loaded[file] = true;
+        if (!ok) {
+          list.push({ id: fallbackId, file, name: fallbackId, description: '', ok: false, error: 'file failed to load' });
+          continue;
+        }
+      }
+      const m = this.registry[fallbackId] || this._byFile(file);
+      if (!m) {
+        // onload fires even when the script threw on its first line, so this covers both
+        // "forgot to call register()" and "the mod has a syntax/runtime error" (console has it)
+        list.push({ id: fallbackId, file, name: fallbackId, description: '', ok: false, error: 'did not register (check the console)' });
+        continue;
+      }
+      list.push({ id: m.id, file, name: m.name, description: m.description, ok: true, error: '' });
+    }
+    this.available = list;
+  },
+  _byFile(file) {
+    for (const id in this.registry) if (this.registry[id].file === file) return this.registry[id];
+    return null;
+  },
+  // One file at a time: the script body runs synchronously before onload fires, so
+  // `_loadingFile` unambiguously names whoever is calling register() right now.
+  _loadFile(file) {
+    return new Promise((resolve) => {
+      const s = document.createElement('script');
+      s.async = false;
+      this._loadingFile = file;
+      s.onload = () => { this._loadingFile = null; resolve(true); };
+      s.onerror = () => { this._loadingFile = null; resolve(false); };
+      s.src = this.DIR + encodeURIComponent(file) + (this._bust ? '?v=' + this._bust : '');
+      document.head.appendChild(s);
+    });
+  },
+
+  _readCache() {
+    try {
+      const c = JSON.parse(localStorage.getItem(this.LS_CACHE));
+      if (c && Array.isArray(c.files) && Date.now() - c.t < this.CACHE_MS) return c;
+    } catch (e) {}
+    return null;
+  },
+  _writeCache(src, files) {
+    try { localStorage.setItem(this.LS_CACHE, JSON.stringify({ t: Date.now(), src, files })); } catch (e) {}
+  },
+};
+
+</script>
+<script>
+'use strict';
 // ============ mobile.js — touch controls (Minecraft PE style) ============
 // Adds an on-screen joystick + look-drag + fully repositionable buttons so the
 // game is playable on a phone/tablet browser (iOS Safari, Android Chrome).
@@ -14558,6 +15394,8 @@ const Mobile = {
   lookMove(x, y) {
     const p = this.game.player;
     if (!p) return;
+    // asleep: the view is locked to the bed (vanilla), so a drag only moves the anchor
+    if (this.game.sleeping) { this.lookX = x; this.lookY = y; return; }
     const sens = 0.0032 + this.game.options.sens * 0.0075;
     p.yaw += (x - this.lookX) * sens;
     p.pitch = clamp(p.pitch + (y - this.lookY) * sens, -Math.PI / 2 + 0.001, Math.PI / 2 - 0.001);
@@ -15045,7 +15883,7 @@ const MP_GUEST_CHUNK_BUDGET = 2;   // chunks generated per frame across all gues
 const MP_PROTO = 2;
 
 const Game = {
-  state: 'title', // title|create|loading|play|dead|win
+  state: 'title', // title|create|mods|loading|play|dead|win
   mode: 'survival', // survival|creative
   world: null, dims: {},
   player: null,
@@ -15081,7 +15919,10 @@ const Game = {
   // guest: the host's render distance = the ceiling on ours (0 = not capped). See renderDist.
   mpRDCap: 0, _sentRDCap: null,
   freeSkinSlots: null,
-  mpEnvTimer: 0, sleeping: false,
+  mpEnvTimer: 0, sleeping: false, sleepBed: null, sleepLock: null, sleepSkip: 0, sleepWake: 0,
+  // per-world, chosen when the world is made. `difficultyLocked` is vanilla's one-way switch:
+  // once thrown, nobody can change it in this world again.
+  difficulty: 'normal', difficultyLocked: false,
   // host: per-player-name save data for everyone who ever joined this world, so a
   // guest gets their own inventory/position back when they come back (see mpSendWorld).
   guestData: {}, mpStateTimer: 0, mpAwaitingName: new Map(),
@@ -15134,6 +15975,9 @@ const Game = {
 
   init() {
     Tex.init();
+    // Right after Tex.init, never before: both the auto-item loop (items.js) and buildIcons()
+    // walk `Blocks`, and neither should see the placeholders. See fillUnknownBlocks.
+    fillUnknownBlocks();
     Renderer.init();
     UI.init();
     this.loadOptions();
@@ -15142,14 +15986,17 @@ const Game = {
     // steve arm for first-person view
     MOB_MODELS.steve_arm = { tex: 'steve', boxes: [{ name: 'arm', uv: [40, 16], size: [4, 12, 4], off: [-2 / 16, -12 / 16, -2 / 16] }], pose() {} };
     // full steve model for rendering remote multiplayer players
-    MOB_MODELS.steve = humanoidModel('steve', false);
+    MOB_MODELS.steve = humanoidModel('steve', false, true);
     // uploaded-skin variants: same geometry, but their UVs sample the skin_self /
     // skin_remoteN atlas slots (see textures.js). Used once a skin has been applied.
     // One slot per other player in the room (max room size 10 → 9 remote slots).
-    MOB_MODELS.steve_self = humanoidModel('skin_self', false);
-    for (let i = 0; i < MAX_REMOTE_SKINS; i++) MOB_MODELS['steve_remote' + i] = humanoidModel('skin_remote' + i, false);
+    MOB_MODELS.steve_self = humanoidModel('skin_self', false, true);
+    for (let i = 0; i < MAX_REMOTE_SKINS; i++) MOB_MODELS['steve_remote' + i] = humanoidModel('skin_remote' + i, false, true);
     MOB_MODELS.steve_arm_self = { tex: 'skin_self', boxes: [{ name: 'arm', uv: [40, 16], size: [4, 12, 4], off: [-2 / 16, -12 / 16, -2 / 16] }], pose() {} };
     this.applyArmThick();
+    // optional mods out of the mods/ folder. Async and entirely optional — the game does not
+    // wait for it and runs exactly as before if nothing (or nobody) answers.
+    Mods.init();
     // restore a previously uploaded skin
     try { const s = localStorage.getItem('mcpe_skin'); if (s) this.loadSkinDataURL(s, true); } catch (e) {}
     try { const n = parseInt(localStorage.getItem('mcpe_slots'), 10); if (n) this.mpSlots = clamp(n, 2, 10); } catch (e) {}
@@ -15183,6 +16030,7 @@ const Game = {
     window.addEventListener('mousemove', (e) => {
       if (Mobile.enabled) return; // touch/pointer handled by Mobile
       UI.onMouseMove(e.clientX, e.clientY);
+      if (this.sleeping) return;   // in bed the view is fixed, like vanilla
       if (this.pointerLocked && this.player && this.state === 'play' && UI.screen === 'none') {
         const sens = 0.0012 + this.options.sens * 0.0045;
         this.player.yaw += e.movementX * sens;
@@ -15274,9 +16122,18 @@ const Game = {
         // no `mp` field = a build from before delta entity frames; keep sending them the
         // old full-snapshot format rather than a stream they would silently ignore
         r.proto = m.mp || 1;
+        r.mods = Array.isArray(m.mods) ? m.mods : [];
       }
+      // The mod check happens HERE, before the world snapshot goes out: a guest missing one
+      // of our mods is turned away at the door rather than dropped into a game that is about
+      // to behave in ways their client knows nothing about.
+      if (!this.mpCheckGuestMods(m.from, m.mods)) return;
       this.mpWorldForNamed(m.from, r ? r.name : null);
     });
+    // a packet from another player's copy of some mod
+    Net.on('mod', (m) => Mods.onNet(m));
+    // the host runs a mod we don't have (or have switched off) — bow out and say which
+    Net.on('modkick', (m) => this.onModKick(m));
     // guest lost track of a puppet → wipe our idea of what it knows so both streamed
     // channels rebuild from a keyframe on their next tick
     Net.on('entRs', (m) => {
@@ -15299,6 +16156,7 @@ const Game = {
     // guest: the host moved its render-distance slider — that's the room's ceiling
     Net.on('rdcap', (m) => { if (m.from === 0 && this.mpRole !== 'host') this.setRDCap(m.n); });
     Net.on('sleep', (m) => this.onRemoteSleep(m)); // another player got into / out of a bed
+    Net.on('diff', (m) => this.onRemoteDifficulty(m)); // host changed/locked the difficulty
     Net.on('wake', (m) => this.onRemoteWake(m));   // host decided everyone slept → morning
     Net.on('closed', () => {
       for (const t of this.mpAwaitingName.values()) clearTimeout(t);
@@ -15329,7 +16187,7 @@ const Game = {
         pid, name: '', seen: false,
         tx: 0, ty: 0, tz: 0, dispX: 0, dispY: 0, dispZ: 0,
         yaw: 0, pitch: 0, walkT: 0, walkAmp: 0, age: 0, swing: 1,
-        held: null, mine: null, sn: 0, sleeping: false, dead: false, bodyYaw: null,
+        held: null, mine: null, sn: 0, sleeping: false, sleepBed: null, dead: false, bodyYaw: null, armor: null,
         proto: 1,   // raised to MP_PROTO when their `hello` says they speak delta frames
         hasSkin: false, slot: this.allocSkinSlot(),
       };
@@ -15347,6 +16205,7 @@ const Game = {
     this.freeSkinSlot(r.slot);
   },
   clearRemotes() {
+    Mods.roomMods = null;   // out of the room = no room mod list any more
     for (const pid of Array.from(this.remotes.keys())) this.removeRemote(pid);
     this._remoteProxies.clear();
     this.mpEntTracked.clear();
@@ -15433,6 +16292,8 @@ const Game = {
     const p = this.player, w = this.world;
     Net.send('world', {
       seed: this.seed, mode: this.mode, time: this.time, dim: w.dim,
+      mods: Mods.activeIds(),   // what this room is running (already checked in `hello`)
+      df: DIFFICULTIES.indexOf(this.difficulty), dl: this.difficultyLocked ? 1 : 0,
       rd: this.ownRenderDist,   // the room's render-distance ceiling (see setRDCap)
       hostPos: { x: p.x, y: p.y, z: p.z },
       pdata: (name != null ? this.guestData[this.mpDataKey(name)] : null) || null,
@@ -15495,7 +16356,46 @@ const Game = {
     this.guestData[this.mpDataKey(r && r.name)] = m.d;
   },
   // `to` omitted = tell the whole room; `to` set = only the peer that just joined
-  mpSendHello(to) { Net.send('hello', { name: this.mpMyName(), mp: MP_PROTO }, to); },
+  mpSendHello(to) { Net.send('hello', { name: this.mpMyName(), mp: MP_PROTO, mods: Mods.activeIds() }, to); },
+  // ---- mods in a room (see js/mods.js) ----
+  // host: does this guest run everything we run? Deliberately one-directional and only at
+  // join time — a guest running EXTRA mods of their own is their own business, and
+  // re-checking later would mean throwing somebody out of a world they are standing in.
+  mpCheckGuestMods(pid, theirMods) {
+    if (this.mpRole !== 'host') return true;
+    const mine = Mods.activeIds();
+    if (!mine.length) return true;
+    const theirs = Array.isArray(theirMods) ? theirMods : [];
+    const missing = mine.filter((id) => theirs.indexOf(id) < 0);
+    if (!missing.length) return true;
+    const timer = this.mpAwaitingName.get(pid);
+    if (timer !== undefined) { clearTimeout(timer); this.mpAwaitingName.delete(pid); }
+    const names = Mods.labelsFor(missing).join(', ');
+    Net.send('modkick', { need: missing, names: Mods.labelsFor(missing) }, pid);
+    const r = this.remotes.get(pid);
+    UI.msg(((r && r.name) || 'A player') + ' was turned away - missing: ' + names, '#ffaa00');
+    return false;
+  },
+  // guest: the host turned us away over mods. Land straight on the Mods screen with the
+  // list, so the fix (switch it on, or drop the file in and Reload) is right there.
+  onModKick(m) {
+    if (m.from !== 0) return;
+    const need = Array.isArray(m.need) ? m.need : [];
+    const names = (Array.isArray(m.names) && m.names.length) ? m.names : need;
+    Net.disconnect();
+    this.clearRemotes();
+    this.mpRole = null; this.isGuest = false;
+    UI.mpNotice = '';
+    UI.modsNotice = 'Host is running: ' + (names.join(', ') || 'a mod you do not have');
+    // installed-but-switched-off and never-installed need different instructions
+    const off = need.filter((id) => Mods.isInstalled(id));
+    UI.modsNotice2 = (need.length && off.length === need.length)
+      ? 'Switch it on below, then join again.'
+      : 'Put the missing file in mods/, hit Reload, switch it on.';
+    UI.modsBack = 'mp';
+    this.state = 'mods';
+    Mods.scan(true);
+  },
   // broadcast a chat line to every other player in the room (routed via relay, not the host)
   mpSendChat(text) { if (Net.connected) Net.send('chat', { text: String(text).slice(0, 200) }); },
   // ---- custom skin (phase 4e) ----
@@ -15598,12 +16498,13 @@ const Game = {
     this.mpEnvTimer += dt;
     if (this.mpEnvTimer < 1.5) return;
     this.mpEnvTimer = 0;
-    Net.send('env', { time: Math.round(this.time), w: Weather.state, wt: Math.round(Weather.timer), rd: this.ownRenderDist });
+    Net.send('env', { time: Math.round(this.time), w: Weather.state, wt: Math.round(Weather.timer), rd: this.ownRenderDist, df: DIFFICULTIES.indexOf(this.difficulty), dl: this.difficultyLocked ? 1 : 0 });
   },
   onRemoteEnv(m) {
     if (this.mpRole === 'host' || m.from !== 0) return; // only the host owns the clock
     if (m.time != null) this.time = m.time;
     if (m.rd != null) this.setRDCap(m.rd);   // heartbeat copy of the render-distance ceiling
+    if (m.df != null) this.onRemoteDifficulty({ from: 0, d: m.df, lk: m.dl });
     if (m.w && m.w !== Weather.state) Weather.set(m.w, m.wt);
     else if (m.wt != null) Weather.timer = m.wt;
   },
@@ -15617,7 +16518,24 @@ const Game = {
   mpPlayerCount() { return Net.connected ? Net.count : 1; },
   onRemoteSleep(m) {
     const r = this.getRemote(m.from);
-    if (r) r.sleeping = !!m.v;
+    if (r) {
+      r.sleeping = !!m.v;
+      // the bed they climbed into, so we can lay their body on it instead of leaving them
+      // standing bolt upright next to it
+      r.sleepBed = (m.v && m.bx != null)
+        ? { x: m.bx, y: m.by, z: m.bz, facing: m.bf & 3, fx: [[0, -1], [1, 0], [0, 1], [-1, 0]][m.bf & 3][0], fz: [[0, -1], [1, 0], [0, 1], [-1, 0]][m.bf & 3][1] }
+        : null;
+    }
+    // Both of us clicked the same bed inside one round trip, so both saw it free. Settle it the
+    // same way on both machines instead of leaving two bodies in one bed: the LOWER pid keeps
+    // it. Whoever loses is told why, so it doesn't look like a random eject.
+    if (r && r.sleeping && r.sleepBed && this.sleeping && this.sleepBed
+      && r.sleepBed.x === this.sleepBed.x && r.sleepBed.y === this.sleepBed.y && r.sleepBed.z === this.sleepBed.z
+      && m.from < Net.pid) {
+      this.sleeping = false; this.sleepBed = null; this.sleepLock = null; this.sleepSkip = 0;
+      Net.send('sleep', { v: 0 });
+      UI.msg('This bed is occupied');
+    }
     if (r && r.sleeping) UI.msg((r.name || 'A player') + ' is sleeping (' + this.mpSleepCount() + '/' + this.mpPlayerCount() + ')');
     this.mpCheckSleep();
   },
@@ -15627,6 +16545,7 @@ const Game = {
     if (this.mpSleepCount() < this.mpPlayerCount()) return;
     this.time = Math.ceil(this.time / 24000) * 24000 + 100;
     this.clearSleepers();
+    this.sleepWake = 0.7;   // same fade back into the morning the singleplayer path gets
     Weather.set('clear'); // vanilla: a night's sleep clears the storm
     Net.send('wake', { time: Math.round(this.time) });
     this.mpEnvTimer = 99; // force an env push on the next frame
@@ -15634,20 +16553,33 @@ const Game = {
   },
   clearSleepers() {
     this.sleeping = false;
-    for (const r of this.remotes.values()) r.sleeping = false;
+    this.sleepBed = null;
+    this.sleepLock = null;
+    this.sleepSkip = 0;
+    for (const r of this.remotes.values()) { r.sleeping = false; r.sleepBed = null; }
   },
   onRemoteWake(m) {
     this.clearSleepers();
+    this.sleepWake = 0.7;
     if (m.time != null) this.time = m.time;
     UI.msg('You slept through the night');
   },
   // any movement gets you out of bed again
-  mpUpdateSleep() {
+  mpUpdateSleep(dt) {
     if (!this.sleeping) return;
+    // singleplayer: the fade is running, ride it out and jump to morning at the end. Moving
+    // does NOT cancel it — vanilla commits the moment the screen starts going dark.
+    if (this.sleepSkip > 0) {
+      this.sleepSkip -= dt;
+      if (this.sleepSkip <= 0) this.finishSleep();
+      return;
+    }
     const K = this.player && this.player.keys;
     if (!K) return;
     if (K.fwd || K.back || K.left || K.right || K.jump) {
       this.sleeping = false;
+      this.sleepBed = null;
+      this.sleepLock = null;
       if (Net.connected) Net.send('sleep', { v: 0 });
       UI.msg('You got up');
     }
@@ -15656,10 +16588,14 @@ const Game = {
     if (m.from !== 0) return; // only the host hands out worlds
     // guest side: build the host's world from the payload, spawn beside the host
     this.isGuest = true; this.mpRole = 'guest';
+    Mods.roomMods = Array.isArray(m.mods) ? m.mods : [];
     this.mpSendHello();
     this.mpSendSkin();
     // before anything is generated or reported: the host's render distance caps ours
     this.setRDCap(m.rd);
+    // the room plays on the host's difficulty, whatever this guest last played on locally
+    if (m.df != null) this.difficulty = DIFFICULTIES[m.df] || 'normal';
+    this.difficultyLocked = !!m.dl;
     this.mpSendViewRadius(true);   // tell the host how far to stream entities to us
     this.currentWorldId = 0;
     const hp = m.hostPos || { x: 8, y: 70, z: 8 };
@@ -15709,6 +16645,7 @@ const Game = {
       if (m.hd != null) r.held = m.hd || null;
       if (m.mn != null) r.mine = m.mn || null;
       if (m.fl != null) { r.sn = (m.fl & 1) ? 1 : 0; r.dead = !!(m.fl & 2); }
+      if (m.am != null) r.armor = armorSuitUnpack(m.am);
       // Only a packet carrying a full position may promote us to `seen` — that flag turns
       // on entity culling, mob targeting and PvP against this player, all of which would
       // aim at (0,0) if a bare delta got there first.
@@ -15720,6 +16657,7 @@ const Game = {
     r.mine = m.mine || null;
     r.sn = m.sn ? 1 : 0;
     r.dead = !!m.dd;
+    r.armor = armorSuitUnpack(m.am || 0);
     if (!r.seen) { r.seen = true; r.dispX = m.x; r.dispY = m.y; r.dispZ = m.z; }
   },
   updateRemotes(dt) {
@@ -16747,7 +17685,7 @@ const Game = {
         x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
         yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3),
         held: held ? held.id : null, mine, sn: p.sneaking ? 1 : 0,
-        dd: p.deadFlag ? 1 : 0,
+        dd: p.deadFlag ? 1 : 0, am: armorSuitPack(armorSuitOf(p.inventory)),
       });
       return;
     }
@@ -16765,6 +17703,9 @@ const Game = {
       hd: held ? held.id : 0,
       fl: (p.sneaking ? 1 : 0) | (p.deadFlag ? 2 : 0),
       mk: mine ? mine.join(',') : '',
+      // worn armour, 4 bits a slot. Changes about twice an hour, so the differential below
+      // means it costs nothing until somebody actually puts something on.
+      am: armorSuitPack(armorSuitOf(p.inventory)),
     };
     const now = performance.now();
     const last = this._posLast;
@@ -16778,7 +17719,7 @@ const Game = {
       // omitted when not mining, which left anyone who already had us mining a block showing
       // break cracks on it forever: the keyframe didn't clear them, and the next delta saw no
       // change (both sides '' by then) so it never sent the clear either.
-      msg.hd = cur.hd; msg.fl = cur.fl; msg.mn = mine || 0;
+      msg.hd = cur.hd; msg.fl = cur.fl; msg.mn = mine || 0; msg.am = cur.am;
     } else {
       if (cur.x !== last.x) msg.x = cur.x;
       if (cur.y !== last.y) msg.y = cur.y;
@@ -16787,6 +17728,7 @@ const Game = {
       if (cur.pt !== last.pt) msg.pt = cur.pt;
       if (cur.hd !== last.hd) msg.hd = cur.hd;
       if (cur.fl !== last.fl) msg.fl = cur.fl;
+      if (cur.am !== last.am) msg.am = cur.am;
       // `mn` is only ever absent-or-present, so send it (or an explicit clear) on change
       if (cur.mk !== last.mk) msg.mn = mine || 0;
       let n = 0; for (const k in msg) n++;
@@ -16837,6 +17779,10 @@ const Game = {
     }
     if (this.state === 'worlds' && down) {
       if (code === 'Escape') this.state = 'title';
+      return;
+    }
+    if (this.state === 'mods' && down) {
+      if (code === 'Escape') this.onButton('mods_back');
       return;
     }
     if (this.state === 'mp' && down) {
@@ -16934,6 +17880,10 @@ const Game = {
       else UI.selectedWorld = wid;
       return;
     }
+    if (id.startsWith && id.startsWith('mod_toggle_')) {
+      Mods.toggle(id.slice(11));
+      return;
+    }
     switch (id) {
       case 'single': this.state = 'worlds'; UI.selectedWorld = null; break;
       case 'multiplayer_menu': this.state = 'mp'; UI.mpCode = ''; UI.mpFocus = 'name'; UI.mpNotice = ''; this.mpMyName(); this.mpRole = null; this.isGuest = false; Net.disconnect(); this.clearRemotes(); this.initNet(); break;
@@ -16947,6 +17897,11 @@ const Game = {
       case 'mp_upload_skin': this.pickSkin(); break;
       case 'mp_cancel': Net.disconnect(); this.state = 'mp'; UI.mpCode = ''; break;
       case 'mp_back': Net.disconnect(); this.state = 'title'; UI.mpNotice = ''; break;
+      // ---- mods (see js/mods.js) ----
+      case 'mods_menu': this.state = 'mods'; UI.modsBack = 'title'; UI.modsNotice = ''; UI.modsNotice2 = ''; Mods.scan(); break;
+      // bypasses the discovery cache — this is the button you press after uploading a mod
+      case 'mods_reload': Mods.scan(true); break;
+      case 'mods_back': this.state = UI.modsBack || 'title'; UI.modsBack = 'title'; UI.modsNotice = ''; UI.modsNotice2 = ''; break;
       // hosting the currently-loaded world, from the pause menu
       case 'mp_host_live': this.mpRole = 'host'; this.isGuest = false; this.mpRDCap = 0; this._sentRDCap = null; this.initNet(); Net.host(Net.defaultRelayUrl(), this.mpSlots); break;
       // how many players the room may hold (us included) — cycles 2..10, wraps round
@@ -16969,14 +17924,29 @@ const Game = {
         break;
       case 'mp_leave': this.mpFlushState(); this.toTitle(); break;
       case 'worlds_play': if (UI.selectedWorld != null) this.loadGame(UI.selectedWorld); break;
-      case 'worlds_create': this.state = 'create'; UI.seedInput = ''; UI.nameInput = ''; UI.createFocus = 'name'; UI.createMode = 'survival'; break;
+      case 'worlds_create': this.state = 'create'; UI.seedInput = ''; UI.nameInput = ''; UI.createFocus = 'name'; UI.createMode = 'survival'; UI.createDifficulty = 'normal'; break;
       case 'worlds_delete': if (UI.selectedWorld != null) { this.deleteWorld(UI.selectedWorld); UI.selectedWorld = null; } break;
       case 'worlds_back': this.state = 'title'; break;
       case 'focus_name': UI.createFocus = 'name'; break;
       case 'focus_seed': UI.createFocus = 'seed'; break;
-      case 'create_go': this.newWorld(UI.seedInput, UI.nameInput, UI.createMode); break;
+      case 'create_go': this.newWorld(UI.seedInput, UI.nameInput, UI.createMode, UI.createDifficulty); break;
       case 'create_back': this.state = 'worlds'; break;
       case 'create_mode': UI.createMode = UI.createMode === 'creative' ? 'survival' : 'creative'; break;
+      case 'create_difficulty': {
+        const i = DIFFICULTIES.indexOf(UI.createDifficulty || 'normal');
+        UI.createDifficulty = DIFFICULTIES[(i + 1) % DIFFICULTIES.length];
+        break;
+      }
+      case 'difficulty': this.cycleDifficulty(); break;
+      case 'difflock': UI.screen = 'difflock'; break;
+      case 'difficulty_lock': UI.screen = 'difflock'; break;
+      case 'difflock_yes':
+        this.difficultyLocked = true;
+        this.mpPushDifficulty();
+        UI.screen = 'options';
+        UI.msg('Difficulty locked on ' + DIFFICULTY_LABEL[this.difficulty]);
+        break;
+      case 'difflock_no': UI.screen = 'options'; break;
       case 'options_title': UI.optionsBack = 'title'; UI.screen = 'options'; this.state = 'title_options'; break;
       case 'resume': UI.screen = 'none'; this.requestPointer(); break;
       case 'options': UI.optionsBack = 'pause'; UI.screen = 'options'; break;
@@ -17076,16 +18046,18 @@ const Game = {
     this.saveWorldsIndex(this.worldsIndex().filter(w => w.id !== id));
   },
   hasSave() { return this.worldsIndex().length > 0; },
-  newWorld(seedStr, name, mode) {
+  newWorld(seedStr, name, mode, difficulty) {
     let seed;
     if (seedStr && seedStr.trim()) {
       const n = parseInt(seedStr.trim());
       seed = isNaN(n) ? xmur3(seedStr.trim())() : (n >>> 0);
     } else seed = (Math.random() * 0xFFFFFFFF) >>> 0;
     this.mode = mode === 'creative' ? 'creative' : 'survival';
+    this.difficulty = validDifficulty(difficulty);
+    this.difficultyLocked = false;
     const idx = this.worldsIndex();
     const id = idx.reduce((m, w) => Math.max(m, w.id), 0) + 1;
-    idx.push({ id, name: (name && name.trim()) || 'World ' + id, seed, mode: this.mode, created: Date.now(), played: Date.now() });
+    idx.push({ id, name: (name && name.trim()) || 'World ' + id, seed, mode: this.mode, difficulty: this.difficulty, created: Date.now(), played: Date.now() });
     this.saveWorldsIndex(idx);
     this.currentWorldId = id;
     this.startWorld(seed, null);
@@ -17220,6 +18192,10 @@ const Game = {
       const dimSave = (w) => this.dimSave(w);
       const save = {
         v: 1, seed: this.seed, time: this.time, dim: this.world.dim, mode: this.mode,
+        // which mods this world has been played with. Re-stamped on every save, so it tracks
+        // whatever is switched on now — loadGame refuses to open it without them.
+        mods: Mods.activeIds(),
+        difficulty: this.difficulty, difficultyLocked: this.difficultyLocked,
         weather: Weather.state, weatherTime: Weather.timer,
         dragonKilled: this.dragonKilled, dragonSpawned: this.dragonSpawned,
         achievements: this.achievements,
@@ -17242,12 +18218,36 @@ const Game = {
     let save;
     try { save = JSON.parse(localStorage.getItem('mcjs_save_' + id)); } catch (e) {}
     if (!save) { this.state = 'create'; return; }
+    // This world was played with mods we are not running. Its terrain and chests can be full
+    // of their blocks and items, so opening it now would quietly mangle it — the placeholder
+    // in fillUnknownBlocks stops the crash, but a save is worth more than not crashing.
+    // Saves from before this existed carry no list and are never blocked.
+    if (!this.modGateWorld(save.mods)) return;
     this.currentWorldId = id;
     this.startWorld(save.seed, save);
+  },
+  // false = refused, and the player has been put on the Mods screen with the reason. Same
+  // screen and the same two notice lines the multiplayer modkick uses.
+  modGateWorld(saveMods) {
+    const missing = Mods.missing(saveMods);
+    if (!missing.length) return true;
+    const names = Mods.labelsFor(missing);
+    UI.modsNotice = 'This world needs: ' + names.join(', ');
+    const off = missing.filter((mid) => Mods.isInstalled(mid));
+    UI.modsNotice2 = (off.length === missing.length)
+      ? 'Switch it on below, then open the world again.'
+      : 'Put the missing file in mods/, hit Reload, switch it on.';
+    UI.modsBack = 'worlds';
+    this.state = 'mods';
+    Mods.scan(true);
+    return false;
   },
   applySave(save) {
     this.time = save.time;
     this.mode = save.mode || 'survival';
+    // worlds made before difficulty existed load as Normal, which is what they were playing
+    this.difficulty = validDifficulty(save.difficulty);
+    this.difficultyLocked = !!save.difficultyLocked;
     Weather.reset();
     if (save.weather) Weather.set(save.weather, save.weatherTime);
     this.dragonKilled = save.dragonKilled; this.dragonSpawned = save.dragonSpawned;
@@ -17350,17 +18350,131 @@ const Game = {
         return;
       }
     }
+    // one sleeper per bed, like vanilla — two bodies in one bed drew straight through each other
+    const bed = this.bedAnchor(x, y, z);
+    if (this.bedOccupant(bed)) { UI.msg('This bed is occupied'); return; }
     this.player.bedSpawn = { x: x + 0.5, y: y + 1, z: z + 0.5 };
     Sfx.play('click');
+    // remember WHICH bed and which way round it lies — that is what lets us lay the body on it
+    // and put the camera on the pillow instead of leaving you standing beside it
+    this.sleepBed = bed;
+    // Vanilla puts you IN the bed and holds you there. Without this the model lay on the
+    // mattress while the real body stayed standing beside it, so mobs, PvP and the nametag all
+    // aimed at a spot you had visually left. Held by lockSleeper() every frame.
+    this.sleepLock = { x: bed.x + 0.5, y: bed.y + 0.5625, z: bed.z + 0.5 };
+    this.sleeping = true;
     // multiplayer: EVERY player has to be in a bed before the night is skipped
     if (Net.connected) {
-      this.sleeping = true;
-      Net.send('sleep', { v: 1 });
+      const b = this.sleepBed;
+      Net.send('sleep', { v: 1, bx: b.x, by: b.y, bz: b.z, bf: b.facing });
       this.mpCheckSleep();
-      if (this.sleeping) UI.msg('Sleeping (' + this.mpSleepCount() + '/' + this.mpPlayerCount() + ') — waiting for the others');
+      if (this.sleeping) UI.msg('Sleeping (' + this.mpSleepCount() + '/' + this.mpPlayerCount() + ') - waiting for the others');
       return;
     }
+    // singleplayer: vanilla doesn't teleport you to morning the instant you click, it lies you
+    // down and fades out. sleepSkip counts that fade down in update(); the time jump happens at
+    // the bottom of it, in finishSleep().
+    this.sleepSkip = 1.6;
+  },
+  // Which bed is this, and which way round? Returns the FOOT block plus the unit step towards
+  // the head — clicking either half has to land on the same answer, so the sleeper always lies
+  // the same way regardless of which end they right-clicked.
+  bedAnchor(x, y, z) {
+    const data = this.world.getData(x, y, z);
+    const facing = (data >> 1) & 3;
+    const isHead = (data & 8) !== 0;
+    const [fx, fz] = [[0, -1], [1, 0], [0, 1], [-1, 0]][facing];
+    return { x: isHead ? x - fx : x, y, z: isHead ? z - fz : z, fx, fz, facing };
+  },
+  // The entity fields that lay a standing player model down on `bed`. The origin is anchored
+  // half a block BEYOND the foot end: from there the model's own bone pivots (feet at 0, hips
+  // at 0.75, head at 1.5) fall exactly along the two-block bed once `lie` tips them over, so
+  // the head box lands on the pillow half and the feet stop at the foot edge.
+  sleepFigure(bed) {
+    return {
+      x: bed.x + 0.5 - bed.fx * 0.5,
+      y: bed.y + 0.6875,   // bed top (9/16) + half the torso's thickness, so the back rests on it
+      z: bed.z + 0.5 - bed.fz * 0.5,
+      yaw: Math.atan2(-bed.fx, bed.fz),   // face along the bed, feet-first
+      lie: -Math.PI / 2,
+      // a sleeper is limp: no walk cycle, no swing, no crouch, head straight
+      walkT: 0, walkAmp: 0, swing: 1, sneak: 0, headPitch: 0, sleeping: 1,
+    };
+  },
+  // Cycle to the next difficulty. Guests never own the rules, and a locked world refuses.
+  cycleDifficulty() {
+    if (this.isGuest && Net.connected) { UI.msg('Only the host can change the difficulty'); return; }
+    if (this.difficultyLocked) { UI.msg('Difficulty is locked for this world'); return; }
+    const i = DIFFICULTIES.indexOf(this.difficulty);
+    this.setDifficulty(DIFFICULTIES[(i + 1) % DIFFICULTIES.length]);
+  },
+  setDifficulty(d) {
+    this.difficulty = validDifficulty(d);
+    // switching TO peaceful clears the hostiles that are already out there, like vanilla
+    if (this.difficulty === 'peaceful') this.clearHostiles();
+    this.mpPushDifficulty();
+  },
+  // every hostile in every dimension, gone
+  clearHostiles() {
+    for (const dim of ['overworld', 'nether', 'end']) {
+      const w = this.dims && this.dims[dim];
+      if (!w) continue;
+      for (const e of w.entities) if (e instanceof HostileMob && !e.dead) e.remove();
+    }
+  },
+  // host -> room. Difficulty rides its own message rather than the 1.5s env heartbeat so a
+  // change lands immediately; the heartbeat carries it too, as a repair for a dropped packet.
+  mpPushDifficulty() {
+    if (this.mpRole !== 'host' || !Net.connected) return;
+    Net.send('diff', { d: DIFFICULTIES.indexOf(this.difficulty), lk: this.difficultyLocked ? 1 : 0 });
+  },
+  onRemoteDifficulty(m) {
+    if (this.mpRole === 'host' || m.from !== 0) return;   // only the host owns the rules
+    const d = DIFFICULTIES[m.d];
+    if (d && d !== this.difficulty) {
+      this.difficulty = d;
+      UI.msg('Difficulty is now ' + DIFFICULTY_LABEL[d]);
+    }
+    if (m.lk != null) this.difficultyLocked = !!m.lk;
+  },
+  // Is somebody else already in this bed? Only checks the other players — our own state is
+  // handled by the caller.
+  bedOccupant(bed) {
+    for (const r of this.remotes.values()) {
+      if (r.sleeping && r.sleepBed && r.sleepBed.x === bed.x && r.sleepBed.y === bed.y && r.sleepBed.z === bed.z) return r;
+    }
+    return null;
+  },
+  // Pin the body to the bed for as long as we are in it. Runs right after the player's own
+  // physics so gravity and any leftover velocity are overwritten, not fought with.
+  lockSleeper() {
+    if (!this.sleeping || !this.sleepLock || !this.player) return;
+    const p = this.player, L = this.sleepLock;
+    p.x = L.x; p.y = L.y; p.z = L.z;
+    p.vx = 0; p.vy = 0; p.vz = 0;
+    p.sprinting = false; p.sneaking = false;
+    p.fallStart = p.y;   // no fall damage for the drop onto the mattress
+    // Vanilla also takes your head: in bed you face along the bed away from the pillow and
+    // the mouse does nothing. Look input is blocked at the source too, so this is a reset
+    // rather than a fight with the input handler every frame.
+    const b = this.sleepBed;
+    if (b) { p.yaw = this.bedLookYaw(b); p.pitch = 0; }
+  },
+  // Which way you face while lying in a bed: from the pillow along the bed towards the foot.
+  // (fx,fz) is the FOOT -> HEAD step, so the look direction is its opposite. This project
+  // uses forward = (sin yaw, -cos yaw), which makes yaw = atan2(-fx, fz). Get the sign wrong
+  // and two of the four bed orientations point at the wrong compass direction while the other
+  // two look fine - so all four are worth testing, not one.
+  bedLookYaw(bed) { return Math.atan2(-bed.fx, bed.fz); },
+  // the fade has run out: jump to morning and get up
+  finishSleep() {
+    this.sleepSkip = 0;
+    this.sleepWake = 0.7;   // fade back IN, so morning doesn't just snap on
+    this.sleeping = false;
+    this.sleepBed = null;
+    this.sleepLock = null;
     this.time = Math.ceil(this.time / 24000) * 24000 + 100;
+    Weather.set('clear');   // vanilla: a night's sleep clears the storm
     UI.msg('You slept through the night');
   },
 
@@ -17566,7 +18680,7 @@ const Game = {
     // toTitle(), which nulls this.player/this.world, and the rest of a play tick (streamChunks,
     // the step-sound block) dereferences them without asking. Doing it mid-tick threw.
     if (this.mpCheckSilence()) return;
-    if (this.state === 'title' || this.state === 'create' || this.state === 'title_options' || this.state === 'worlds' || this.state === 'mp') {
+    if (this.state === 'title' || this.state === 'create' || this.state === 'title_options' || this.state === 'worlds' || this.state === 'mp' || this.state === 'mods') {
       UI.draw(this, dt);
       return;
     }
@@ -17601,8 +18715,10 @@ const Game = {
       }
       Mobile.update(dt);
       p.update(dt, this);
+      this.lockSleeper();
       updateEntities(w, dt, this);
       this.updateRemotes(dt);
+      Mods.tick(dt);   // no-op unless a mod is switched on
       // our own body lags our look the same way, for third person (F4)
       this.selfBodyYaw = this.stepBodyYaw(
         this.selfBodyYaw, p.yaw, dt,
@@ -17616,7 +18732,8 @@ const Game = {
       this.mpBroadcastEnts(dt);
       this.mpBroadcastEnv(dt);
       this.mpSendState(dt);
-      this.mpUpdateSleep();
+      this.mpUpdateSleep(dt);
+      if (this.sleepWake > 0) this.sleepWake = Math.max(0, this.sleepWake - dt);
       Particles.update(dt, w);
       Weather.update(dt, this);
       // dragon boss bar
@@ -17694,12 +18811,16 @@ const Game = {
   },
   drawRemotePlayer(w, r) {
     const modelName = (r.hasSkin && r.slot != null) ? 'steve_remote' + r.slot : 'steve';
-    this.drawPlayerFigure(w, {
+    const e = {
       type: modelName, model: modelName, x: r.dispX, y: r.dispY, z: r.dispZ, h: 1.8, w: 0.6,
       yaw: r.bodyYaw != null ? r.bodyYaw : r.yaw, headYaw: r.yaw,
       headPitch: r.pitch, walkT: r.walkT, walkAmp: r.walkAmp, age: r.age,
       swing: r.swing == null ? 1 : r.swing, sneak: r.sn ? 1 : 0,
-    }, r.held);
+      armor: r.armor || null,
+    };
+    // in a bed: the body moves onto the mattress and every animation stops
+    if (r.sleeping && r.sleepBed) Object.assign(e, this.sleepFigure(r.sleepBed), { headYaw: undefined });
+    this.drawPlayerFigure(w, e, r.held);
   },
   // shared by the remote players and (in third person) by ourselves
   drawPlayerFigure(w, e, heldId) {
@@ -17739,14 +18860,26 @@ const Game = {
     Renderer.curFov = this.curFovSmooth;
     // third person (F4): pull the camera back along (or forward past) the look ray.
     // Aiming/mining keeps using the EYE, exactly like vanilla — only the camera moves.
-    let cx = eye[0], cy = eye[1], cz = eye[2], cyaw = p.yaw, cpitch = p.pitch;
+    // Asleep, the camera belongs on the PILLOW — the body itself never moves (vanilla keeps
+    // the entity where it stood and just re-poses it), so without this you would be watching
+    // your own model lie down from wherever you were standing. Aiming still uses the real eye.
+    let cam = eye;
+    if (this.sleeping && this.sleepBed) {
+      // 1.2 blocks from the foot-block centre puts the camera ON the pillow (the head block
+      // spans 0.5..1.5 along that axis, and the pillow is its outer half), looking back down
+      // the length of the bed. Deliberately short of 1.5: a headboard is usually against a
+      // wall, and the last 0.3 is what keeps the camera out of it.
+      const b = this.sleepBed;
+      cam = [b.x + 0.5 + b.fx * 1.2, b.y + 0.88, b.z + 0.5 + b.fz * 1.2];
+    }
+    let cx = cam[0], cy = cam[1], cz = cam[2], cyaw = p.yaw, cpitch = p.pitch;
     if (this.viewMode) {
       const back = this.viewMode === 1;
       const d = p.lookDir();
       const dx = back ? -d[0] : d[0], dy = back ? -d[1] : d[1], dz = back ? -d[2] : d[2];
-      const dist = this.cameraBack(eye, dx, dy, dz, this.camDist);
+      const dist = this.cameraBack(cam, dx, dy, dz, this.camDist);
       this.camDistCur = dist;
-      cx = eye[0] + dx * dist; cy = eye[1] + dy * dist; cz = eye[2] + dz * dist;
+      cx = cam[0] + dx * dist; cy = cam[1] + dy * dist; cz = cam[2] + dz * dist;
       // the front view looks the other way: turn 180° and invert the pitch
       if (!back) { cyaw = p.yaw + Math.PI; cpitch = -p.pitch; }
     }
@@ -17838,14 +18971,17 @@ const Game = {
     if (this.camDistCur < 0.55) return;
     const modelName = this.hasSkin ? 'steve_self' : 'steve';
     const held = p.heldItem();
-    this.drawPlayerFigure(w, {
+    const e = {
       type: modelName, model: modelName, x: p.x, y: p.y, z: p.z, h: 1.8, w: 0.6,
       yaw: this.selfBodyYaw != null ? this.selfBodyYaw : p.yaw, headYaw: p.yaw, headPitch: p.pitch,
       // bobT tracks distance walked; limbAmp (NOT bobAmp) is the limb swing — bobAmp is the
       // camera's and is killed the instant you leave the ground, which froze the model mid-jump
       walkT: p.bobT, walkAmp: p.limbAmp, age: 0,
       swing: p.swing, sneak: p.sneaking ? 1 : 0,
-    }, held ? held.id : null);
+      armor: armorSuitOf(p.inventory),
+    };
+    if (this.sleeping && this.sleepBed) Object.assign(e, this.sleepFigure(this.sleepBed), { headYaw: undefined });
+    this.drawPlayerFigure(w, e, held ? held.id : null);
   },
   drawViewModel(dt) {
     const p = this.player;
