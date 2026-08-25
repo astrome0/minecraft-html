@@ -244,10 +244,27 @@ function resolve(x, y, z, pid) {
   Particles.burst('happy', x + 0.5, y + 0.5, z + 0.5, 12, 0.4);
   Sfx.play('pop', { pos: [x + 0.5, y + 0.5, z + 0.5] });
   try { out.run(w, x, y, z, rng, pid); } catch (e) { console.error('[luckyblock] ' + out.name, e); }
-  // tell the room what happened — chat is already relayed to everyone
-  const who = (pid == null || pid < 0 || pid === Net.pid) ? 'You' : ((Game.remotes.get(pid) || {}).name || 'Someone');
-  UI.msg('Lucky Block: ' + out.name, out.color);
-  if (typeof Net !== 'undefined' && Net.connected) Game.mpSendChat(who + ' hit a Lucky Block: ' + out.name);
+  announce(pid, out.name, out.color);
+}
+
+// Everyone gets the SAME coloured banner. This used to go out as a chat line, which meant the
+// host saw a nice coloured message and everybody else got a wall of grey "<Player> Guest hit a
+// Lucky Block: ..." spam. Sending it down the mod channel instead lets each client render it
+// properly, and resolve "You" from its own point of view.
+function announce(pid, name, color) {
+  showAnnounce(pid, name, color);
+  if (typeof Net !== 'undefined' && Net.connected) {
+    const m = Mods.registry.luckyblock;
+    if (m) Mods.api(m).send({ ann: name, c: color, p: pid });   // broadcast, no `to`
+  }
+}
+function showAnnounce(pid, name, color) {
+  let who = 'You';
+  if (pid != null && pid >= 0 && typeof Net !== 'undefined' && Net.pid != null && pid !== Net.pid) {
+    const r = Game.remotes.get(pid);
+    who = (r && r.name) || 'Player';
+  }
+  UI.msg(who + ' hit a Lucky Block: ' + name, color || '#ffff55');
 }
 
 // ---------- hook ----------
@@ -273,7 +290,7 @@ function installHooks() {
 Mods.register({
   id: 'luckyblock',
   name: 'Lucky Block',
-  description: 'Break it and something random happens - treasure, an ambush, a launch, or worse.',
+  description: 'Break it - something random happens.',
 
   onEnable() {
     buildTextures();
@@ -286,8 +303,11 @@ Mods.register({
     unregister();
   },
   onNet(api, d, from) {
-    // a guest asking us to roll for them, or the host telling us to launch ourselves
+    // the host announcing what it rolled, to everyone
+    if (d.ann) { showAnnounce(d.p, d.ann, d.c); return; }
+    // the host telling us to launch ourselves
     if (d.fx) { applySelfEffect(d); return; }
+    // a guest asking us to roll for them
     if (d.lx === undefined) return;
     if (Game.mpRole !== 'host') return;   // only the host rolls
     resolve(d.lx | 0, d.ly | 0, d.lz | 0, from);

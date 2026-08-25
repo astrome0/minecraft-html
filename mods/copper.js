@@ -231,7 +231,7 @@ function installHooks() {
 Mods.register({
   id: 'copper',
   name: 'Copper & Hammer',
-  description: 'New copper ore in the world. Mining it drops a hammer that cuts 3x1 through walls.',
+  description: 'Copper ore. Mining it drops a hammer.',
 
   onEnable() {
     buildTextures();
