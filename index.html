@@ -15013,6 +15013,11 @@ const Mods = {
     this._loaded = {};
     this.available = [];
     this._bust = Date.now();
+    // Purge HERE too, not only at the end of rebuildActive: a forced re-scan tears every mod
+    // down and then goes off to the network, and rebuildActive is a fetch away. Frames keep
+    // drawing through that gap, so a tool from a just-unregistered mod would sit in the hotbar
+    // throwing in drawStack until the scan came back.
+    this.purgeUnknownStacks();
   },
 
   async _loadAll(files) {
