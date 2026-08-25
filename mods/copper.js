@@ -24,8 +24,11 @@ const ORE_ID = 200;
 const HAMMER = 'copper_hammer';
 const ORE_ITEM = 'copper_ore';
 
-// what onDisable has to undo
-let wrapped = null;      // { genOrig, breakOrig }
+// Wrappers are installed ONCE and never taken off again — they check `on` instead. Restoring
+// the saved original on disable looks tidier but silently clobbers any mod that wrapped the
+// same function after us, which is a real scenario the moment there are two content mods.
+let hooked = false;      // wrappers installed
+let on = false;          // ...and currently doing anything
 let texDone = false;     // Tex.reg allocates a new atlas slot every call — only ever once
 let busy = false;        // re-entrancy guard for our own extra breaks
 
@@ -181,14 +184,14 @@ function wearTool(held) {
 }
 
 function installHooks() {
-  if (wrapped) return;
+  if (hooked) return;
+  hooked = true;
   const genOrig = Gen.generateChunk;
   const breakOrig = World.prototype.breakBlock;
-  wrapped = { genOrig, breakOrig };
 
   Gen.generateChunk = function (world, chunk) {
     const r = genOrig.call(this, world, chunk);
-    try { injectOre(world, chunk); } catch (e) { console.error('[copper] injectOre', e); }
+    if (on) { try { injectOre(world, chunk); } catch (e) { console.error('[copper] injectOre', e); } }
     return r;
   };
 
@@ -197,7 +200,7 @@ function installHooks() {
     // and reports whatever is behind it. Guarded on the player actually aiming at this block,
     // which is what keeps explosions, fluids and falling sand out of here.
     let extra = null, held = null;
-    if (!busy && typeof Game !== 'undefined' && Game.player && this === Game.world && Game.state === 'play') {
+    if (on && !busy && typeof Game !== 'undefined' && Game.player && this === Game.world && Game.state === 'play') {
       held = Game.player.heldItem();
       if (held && held.id === HAMMER) {
         const hit = aimHit(this);
@@ -224,13 +227,6 @@ function installHooks() {
     return r;
   };
 }
-function removeHooks() {
-  if (!wrapped) return;
-  // only restore what is still ours — another mod may have wrapped on top since
-  if (Gen.generateChunk.length !== undefined && wrapped.genOrig) Gen.generateChunk = wrapped.genOrig;
-  if (wrapped.breakOrig) World.prototype.breakBlock = wrapped.breakOrig;
-  wrapped = null;
-}
 
 Mods.register({
   id: 'copper',
@@ -241,9 +237,10 @@ Mods.register({
     buildTextures();
     register();
     installHooks();
+    on = true;
   },
   onDisable() {
-    removeHooks();
+    on = false;
     unregister();
   },
 });
