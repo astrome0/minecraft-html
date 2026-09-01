@@ -5384,7 +5384,8 @@ class World {
       const [x, y, z] = key.split(',').map(Number);
       if (this.getBlock(x, y, z) !== B.PRESSURE_PLATE) { this.redstonePlates.delete(key); this.plateHold.delete(key); continue; }
       let occupied = false;
-      const p = game.player;
+      // not game.player: a dedicated server's anchor would hold a plate down at spawn forever
+      const p = (game.serverAnchorHidden ? null : game.player);
       if (p && !p.deadFlag && onPlate(p, x, y, z)) occupied = true;
       if (!occupied) for (const e of this.entities) { if (!e.dead && onPlate(e, x, y, z)) { occupied = true; break; } }
       // The other players stand on plates too. They are not in world.entities (a remote is a
@@ -5978,11 +5979,20 @@ class World {
       if (be.type === 'furnace') { if (!guest) this.tickFurnace(be); }
       else if (be.type === 'spawner') this.tickSpawner(be, game);
     }
-    // random ticks: crops, saplings, grass spread — only near player, host only
+    // Random ticks: crops, saplings, grass spread, leaf decay. Host only, and around EVERY
+    // player — this used to be the ±3 chunks around game.player, which on a dedicated server
+    // is the invisible anchor at world spawn, so a farm built anywhere else simply never grew.
+    // Chunks are de-duplicated, or two players standing together would tick theirs twice.
     if (guest) return;
-    const p = game.player;
-    const pcx = floor(p.x) >> 4, pcz = floor(p.z) >> 4;
+    const anchors = game.playerAnchors ? game.playerAnchors()
+      : [{ x: game.player.x, z: game.player.z }];
+    const seenChunks = new Set();
+    for (const an of anchors) {
+    const pcx = floor(an.x) >> 4, pcz = floor(an.z) >> 4;
     for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
+      const ck = (pcx + dx) + ',' + (pcz + dz);
+      if (seenChunks.has(ck)) continue;
+      seenChunks.add(ck);
       const c = this.getChunk(pcx + dx, pcz + dz);
       if (!c) continue;
       for (let n = 0; n < 3; n++) {
@@ -6018,6 +6028,7 @@ class World {
           if (!this.leafHasLog(wx, y, wz)) this.decayLeaf(wx, y, wz);
         }
       }
+    }
     }
   }
   // A log just went away, so every leaf that could have been leaning on it gets a decay check
@@ -6134,10 +6145,12 @@ class World {
     }
   }
   tickSpawner(be, game) {
-    const p = game.player;
     if (game.world !== this) return;
-    const d2 = (p.x - be.x) ** 2 + (p.y - be.y) ** 2 + (p.z - be.z) ** 2;
-    if (d2 > 16 * 16) return;
+    // Vanilla arms a spawner when a player is within 16 blocks. That used to mean the local
+    // player only, so on a dedicated server every dungeon spawner in the world was dead
+    // unless it happened to sit within 16 blocks of spawn.
+    const nearPlayer = game.nearestAnchor ? game.nearestAnchor(be.x, be.y, be.z, 16) : null;
+    if (!nearPlayer) return;
     be.cd = (be.cd || 100) - 1;
     if (be.cd > 0) return;
     be.cd = 200 + ((Math.random() * 400) | 0);
@@ -9122,7 +9135,10 @@ class ItemEntity extends Entity {
       }
     }
     // magnet + pickup
-    const p = game && game.world === this.world ? game.player : null;
+    // `localPlayer` and not `game.player`: on a dedicated server that object is an invisible
+    // anchor standing at world spawn, and without this it silently swallows every item that
+    // lands near spawn — the drop just vanishes for the player who was standing right there.
+    const p = game && game.world === this.world ? localPlayer(game) : null;
     if (p && this.pickupDelay <= 0 && !p.deadFlag) {
       const d = Math.hypot(p.x - this.x, p.y + 0.9 - this.y, p.z - this.z);
       if (d < 2) {
@@ -9183,16 +9199,19 @@ class XPOrb extends Entity {
   update(dt, game) {
     this.physics(dt);
     if (this.age > 120) { this.remove(); return; }
-    const p = game && game.world === this.world ? game.player : null;
-    if (p && !p.deadFlag) {
-      const d = Math.hypot(p.x - this.x, p.y + 0.9 - this.y, p.z - this.z);
-      if (d < 7) {
-        this.vx += (p.x - this.x) / d * 22 * dt;
-        this.vy += (p.y + 0.7 - this.y) / d * 22 * dt;
-        this.vz += (p.z - this.z) / d * 22 * dt;
-      }
+    // Orbs used to home in on `game.player` and nothing else, so on a dedicated server they
+    // chased an invisible anchor at spawn and no player ever got XP — and even on a browser
+    // host a GUEST could never collect one. Ask for the nearest real player instead, and hand
+    // the levels over the wire when that player is a remote (Game.awardXP).
+    if (game.world !== this.world) return;
+    const near = game.nearestAnchor ? game.nearestAnchor(this.x, this.y, this.z, 7) : null;
+    if (near) {
+      const a = near.a, d = Math.max(near.d, 0.0001);
+      this.vx += (a.x - this.x) / d * 22 * dt;
+      this.vy += (a.y + 0.7 - this.y) / d * 22 * dt;
+      this.vz += (a.z - this.z) / d * 22 * dt;
       if (d < 0.9) {
-        p.addXP(this.value);
+        game.awardXP(a, this.value);
         this.remove();
       }
     }
@@ -9219,7 +9238,7 @@ class Arrow extends Entity {
       this.stuckT = (this.stuckT || 0) + dt;
       if (this.stuckT > 60) this.remove();
       // player pickup
-      const p = game && game.world === this.world ? game.player : null;
+      const p = game && game.world === this.world ? localPlayer(game) : null;
       if (this.fromPlayer && p && this.stuckT > 0.5 && Math.hypot(p.x - this.x, p.y + 0.9 - this.y, p.z - this.z) < 1.2) {
         if (p.inventory.add(mkStack('arrow', 1)) === 0) {
           Sfx.play('pop', { pos: [this.x, this.y, this.z] });
@@ -9243,7 +9262,7 @@ class Arrow extends Entity {
       if (r && r.t < step && r.t < hitT) { hitT = r.t; hitEnt = e2; }
     }
     // player hit (hostile arrows, or a guest-fired arrow hitting the host = PvP)
-    const p = game && game.world === this.world ? game.player : null;
+    const p = game && game.world === this.world ? localPlayer(game) : null;
     if ((!this.fromPlayer || this.ownerPid != null) && p && !p.deadFlag) {
       const bb = [p.x - 0.4, p.y - 0.1, p.z - 0.4, p.x + 0.4, p.y + 1.9, p.z + 0.4];
       const r = rayBox(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, bb);
@@ -9312,8 +9331,8 @@ class ThrownPearl extends Entity {
     const speed = Math.hypot(this.vx, this.vy, this.vz);
     const hit = this.world.raycast(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, speed * dt);
     if (hit) {
-      const p = game.player;
-      if (game.world === this.world && !p.deadFlag) {
+      const p = localPlayer(game);
+      if (p && game.world === this.world && !p.deadFlag) {
         p.x = hit.px + FACE_N[hit.face][0] * 0.4;
         p.y = hit.py + (hit.face === 4 ? 0.1 : 0.5);
         p.z = hit.pz + FACE_N[hit.face][2] * 0.4;
@@ -9347,7 +9366,7 @@ class Fireball extends Entity {
   update(dt, game) {
     const speed = Math.hypot(this.vx, this.vy, this.vz) || 1;
     const hit = this.world.raycast(this.x, this.y, this.z, this.vx / speed, this.vy / speed, this.vz / speed, speed * dt);
-    const p = game.world === this.world ? game.player : null;
+    const p = game.world === this.world ? localPlayer(game) : null;
     // player collision
     if (p && !this.deflected && !p.deadFlag) {
       const d = Math.hypot(p.x - this.x, p.y + 0.9 - this.y, p.z - this.z);
@@ -9550,7 +9569,7 @@ class PassiveMob extends Mob {
     this.panicT = 4;
   }
   update(dt, game) {
-    const p = game.world === this.world ? game.player : null;
+    const p = game.world === this.world ? localPlayer(game) : null;
     if (this.panicT > 0) {
       this.panicT -= dt;
       if (!this.wx || Math.random() < dt * 2) {
@@ -9750,7 +9769,7 @@ class Wolf extends Mob {
     this.physics(dt);
   }
   update(dt, game) {
-    const p = game.world === this.world ? game.player : null;
+    const p = game.world === this.world ? localPlayer(game) : null;
     if (this.angry) {
       this.angryT -= dt;
       if (this.angryT <= 0) { this.angry = false; this.foe = null; this.syncModel(); }
@@ -9806,7 +9825,7 @@ class Villager extends PassiveMob {
   constructor(w, x, y, z) { super(w, 'villager', x, y, z); this.hp = this.maxHp = 20; this.speed = 1.9; }
   likesItem() { return false; }
   update(dt, game) {
-    const p = game.world === this.world ? game.player : null;
+    const p = game.world === this.world ? localPlayer(game) : null;
     if (p && Math.hypot(p.x - this.x, p.z - this.z) < 4 && this.panicT <= 0) {
       this.lookAt(p.x, p.y + 1.5, p.z, 4, dt);
       this.vx *= 0.8; this.vz *= 0.8;
@@ -9837,7 +9856,9 @@ class HostileMob extends Mob {
   targetPlayer(game) {
     if (game.mode === 'creative') return null;
     if (game.world !== this.world) return null;
-    const p = (game.player && !game.player.deadFlag) ? game.player : null;
+    // localPlayer, so a dedicated server's invisible spawn anchor is never chased
+    const lp = localPlayer(game);
+    const p = (lp && !lp.deadFlag) ? lp : null;
     // multiplayer (host): also consider the other players, pick the nearest of them all
     const rp = game.mpNearestRemoteTarget ? game.mpNearestRemoteTarget(this.x, this.z) : null;
     if (p && rp) {
@@ -10273,7 +10294,7 @@ class EnderDragon extends Entity {
       return;
     }
     this.age += 0;
-    const p = game.world === this.world ? game.player : null;
+    const p = game.world === this.world ? localPlayer(game) : null;
     // healing from crystals
     this.healingCrystal = null;
     let bestD = 44;
@@ -10722,6 +10743,28 @@ function loadEntities(world, list) {
 }
 
 // ---------- natural spawning ----------
+// How often the spawner runs. Every number below is calibrated against it, so changing this
+// one value keeps the despawn maths honest instead of silently changing mob lifetimes.
+const SPAWN_INTERVAL = 1.5;
+
+// Despawning, the way vanilla does it — and the reason it has two radii rather than one.
+//
+// A single hard cutoff (which is all this had) leaves mobs that never wander far enough sitting
+// there for ever. They still count against the mob cap, so once enough of them accumulate near
+// where somebody has been standing, NOTHING spawns anywhere in the dimension again. That is the
+// bug Patrik hit: "mobs spawn there and never despawn, and then no new mobs spawn in my render
+// distance". Vanilla avoids it with a second, gentler rule.
+//
+//   inside DESPAWN_SAFE   never despawns — it is in front of somebody, it has to stay put
+//   beyond DESPAWN_FAR    despawns at once — nobody could possibly be looking
+//   in between            a small chance each pass, so a crowd thins out on its own
+const DESPAWN_SAFE = 32;      // vanilla's figure too
+const DESPAWN_FAR = 110;
+// Vanilla rolls 1/800 per tick beyond 32 blocks, which averages about 40 seconds of life. Ours
+// runs every SPAWN_INTERVAL instead of every tick, so the chance is derived from that rather
+// than copied — same expected lifetime, different cadence.
+const DESPAWN_MEAN_LIFE = 40;
+
 const NaturalSpawner = {
   t: 0,
   update(world, game, dt) {
@@ -10729,12 +10772,41 @@ const NaturalSpawner = {
     if (game.isGuest && Net.connected) return;
     this.t -= dt;
     if (this.t > 0) return;
-    this.t = 1.5;
-    const p = game.player;
+    this.t = SPAWN_INTERVAL;
+    // EVERY player, not just ours. Spawning and despawning both used to key off game.player,
+    // which on a dedicated server is an invisible anchor at world spawn: hostiles more than
+    // 110 blocks from spawn were deleted 1.5s after they appeared and no new one was ever
+    // created near an actual player, so walking away from spawn left a completely dead world.
+    // On a browser host it also means mobs now spawn around a guest, not only around the host.
+    const anchors = game.playerAnchors ? game.playerAnchors() : [{ x: game.player.x, y: game.player.y, z: game.player.z }];
+    // Nobody in the world (an empty dedicated server): simulate nothing rather than despawning
+    // everything, so the mobs that are already out there survive until somebody comes back.
+    if (!anchors.length) return;
+    const nearestD = (x, z) => {
+      let best = Infinity;
+      for (const a of anchors) { const d = Math.hypot(a.x - x, a.z - z); if (d < best) best = d; }
+      return best;
+    };
     const peaceful = game.difficulty === 'peaceful';
+    // A pass through everything alive: work out what goes, and count only what stays. Counting
+    // first (as this used to) charged the cap for mobs being deleted in the same breath, so the
+    // cap ran a pass behind reality and spawning stuttered.
+    const despawnChance = SPAWN_INTERVAL / DESPAWN_MEAN_LIFE;
     let hostiles = 0, passives = 0, squids = 0, wolves = 0;
     for (const e of world.entities) {
       if (e.dead) continue;
+      // Peaceful clears hostiles wherever they are, not just the far ones.
+      if (peaceful && e instanceof HostileMob) { e.remove(); continue; }
+      // What is allowed to vanish on its own. A blaze belongs to its fortress, and a TAMED wolf
+      // is the player's — neither is ever culled, however far it has been left behind.
+      const canDespawn = (e instanceof HostileMob && e.type !== 'blaze') ||
+        e.type === 'squid' || (e.type === 'wolf' && !e.tamed);
+      if (canDespawn) {
+        const d = nearestD(e.x, e.z);
+        if (d > DESPAWN_FAR) { e.remove(); continue; }
+        if (d > DESPAWN_SAFE && Math.random() < despawnChance) { e.remove(); continue; }
+      }
+      // It survives, so it is real competition for the cap.
       if (e instanceof HostileMob) hostiles++;
       else if (e instanceof PassiveMob) passives++;
       // Squid and Wolf hang off Mob rather than PassiveMob (they swim / have tame states
@@ -10742,20 +10814,15 @@ const NaturalSpawner = {
       // many can exist and a forest fills up with wolves.
       else if (e.type === 'squid') squids++;
       else if (e.type === 'wolf') { if (!e.tamed) wolves++; }
-      // despawn far hostiles, plus wild wolves and squid; a TAMED wolf is the player's and
-      // must never be culled, however far it has been left behind
-      const far = Math.hypot(e.x - p.x, e.z - p.z) > 110;
-      if (far && ((e instanceof HostileMob && e.type !== 'blaze') || e.type === 'squid' || (e.type === 'wolf' && !e.tamed))) e.remove();
-      // Peaceful clears hostiles wherever they are, not just the far ones. The dragon is a
-      // boss the player went looking for, so it is left alone - vanilla keeps it too.
-      if (peaceful && e instanceof HostileMob && e.type !== 'dragon') e.remove();
     }
-    const cap = world.dim === 'end' ? 16 : 14;
+    const cap = (world.dim === 'end' ? 16 : 14) * Math.max(1, anchors.length);
     if (!peaceful && hostiles < cap) {
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < 6 * Math.max(1, anchors.length); i++) {
+        // pick a player to spawn around — over many attempts everyone gets their share
+        const who = anchors[(Math.random() * anchors.length) | 0];
         const a = Math.random() * Math.PI * 2;
         const d = 26 + Math.random() * 40;
-        const x = p.x + Math.cos(a) * d, z = p.z + Math.sin(a) * d;
+        const x = who.x + Math.cos(a) * d, z = who.z + Math.sin(a) * d;
         if (!world.isLoaded(floor(x), floor(z))) continue;
         // find standable y
         const ys = [];
@@ -10792,16 +10859,17 @@ const NaturalSpawner = {
       }
     }
     // passive spawns (rare, day, grass)
-    if (world.dim === 'overworld' && passives < 10 && game.dayLight > 0.7 && Math.random() < 0.25) {
+    if (world.dim === 'overworld' && passives < 10 * anchors.length && game.dayLight > 0.7 && Math.random() < 0.25) {
+      const who = anchors[(Math.random() * anchors.length) | 0];
       const a = Math.random() * Math.PI * 2;
       const d = 28 + Math.random() * 30;
-      const x = p.x + Math.cos(a) * d, z = p.z + Math.sin(a) * d;
+      const x = who.x + Math.cos(a) * d, z = who.z + Math.sin(a) * d;
       if (world.isLoaded(floor(x), floor(z))) {
         const biome = Gen.biomeAt(floor(x), floor(z));
         for (let y = 100; y > SEA; y--) {
           if (world.getBlock(floor(x), y, floor(z)) === B.GRASS && world.getBlock(floor(x), y + 1, floor(z)) === B.AIR) {
             // wolves are a forest/taiga mob and arrive as a pack, like vanilla
-            if (wolves < 8 && (biome.id === 'forest' || biome.id === 'taiga' || biome.id === 'birch') && Math.random() < 0.3) {
+            if (wolves < 8 * anchors.length && (biome.id === 'forest' || biome.id === 'taiga' || biome.id === 'birch') && Math.random() < 0.3) {
               for (let k = 0; k < 2 + ((Math.random() * 3) | 0); k++) spawnMob(world, 'wolf', x + Math.random() * 3 - 1.5, y + 1, z + Math.random() * 3 - 1.5);
             } else {
               spawnMob(world, ['pig', 'cow', 'sheep', 'chicken'][(Math.random() * 4) | 0], x, y + 1, z);
@@ -10814,9 +10882,10 @@ const NaturalSpawner = {
     // squid: their own budget, since they live where nothing else spawns. Vanilla wants deep
     // enough water with air above it, in groups of 2-4.
     if (world.dim === 'overworld' && Math.random() < 0.3) {
-      if (squids < 8) {
+      if (squids < 8 * anchors.length) {
+        const who = anchors[(Math.random() * anchors.length) | 0];
         const a = Math.random() * Math.PI * 2, d = 22 + Math.random() * 34;
-        const x = p.x + Math.cos(a) * d, z = p.z + Math.sin(a) * d;
+        const x = who.x + Math.cos(a) * d, z = who.z + Math.sin(a) * d;
         if (world.isLoaded(floor(x), floor(z)) && world.getBlock(floor(x), SEA, floor(z)) === B.WATER) {
           // find a spot with at least 3 blocks of water over its floor
           for (let y = SEA - 1; y > SEA - 14; y--) {
@@ -10836,6 +10905,14 @@ const NaturalSpawner = {
 };
 
 // ---------- update & render all entities ----------
+// The local player, or null when there isn't really one. A dedicated server keeps a
+// Game.player object because hundreds of lines dereference it, but nobody is standing
+// there — so anything that would touch a PERSON (pick an item up, take an arrow, be
+// chased, be teleported by a pearl) has to ask for this instead of game.player.
+// See Game.playerAnchors in main.js for the same idea applied to positions.
+function localPlayer(game) {
+  return (game && game.player && !game.serverAnchorHidden) ? game.player : null;
+}
 function updateEntities(world, dt, game) {
   // flush pending spawns from generation
   if (world.pendingSpawns.length) {
@@ -12783,8 +12860,16 @@ const UI = {
   buttons: [], sliders: [], dragSlider: null,
   seedInput: '', seedFocus: true,
   nameInput: '', createFocus: 'name', selectedWorld: null, createMode: 'survival',
-  mpCode: '', mpFocus: 'code',
+  mpCode: '',
   mpNotice: '', // why we're back on the join screen (host quit, connection lost...)
+  // The Multiplayer screen is four screens in one, switched by mpScreen rather than by
+  // Game.state: 'mp' is already wired into the frame whitelist, the mobile tap router and
+  // the Escape handler, and none of that has to learn about sub-screens this way.
+  mpScreen: 'list',            // list | add | direct | connecting
+  mpSel: null,                 // id of the highlighted server row
+  mpEditId: null,              // set while 'add' is really editing an existing row
+  srvName: '', srvAddr: '', srvFocus: 'name', srvError: '',  // the Add/Edit Server fields
+  accountFocus: 'name',
   creativeScroll: 0, creativeItems: null,
   createDifficulty: 'normal',
   signBE: null, signLine: 0, signLineRects: null,   // sign editor state
@@ -12878,6 +12963,29 @@ const UI = {
     this.textC(label, x + w / 2, y + (h - 8) / 2 + 1, hover ? '#ffffa0' : '#e0e0e0');
     this.buttons.push({ id, x, y, w, h });
     return hover;
+  },
+  // vanilla greys out a button that has nothing to act on (Join/Edit/Delete with no server
+  // picked). Same box, dead text, and no hit-rect at all so the click falls through.
+  buttonOff(x, y, w, label, small) {
+    const h = small ? 14 : 20;
+    this.rect(x, y, w, h, '#5a5a5a');
+    this.rect(x, y, w, 1, '#7a7a7a'); this.rect(x, y, 1, h, '#7a7a7a');
+    this.rect(x, y + h - 1, w, 1, '#2f2f2f'); this.rect(x + w - 1, y, 1, h, '#2f2f2f');
+    this.textC(label, x + w / 2, y + (h - 8) / 2 + 1, '#a0a0a0');
+  },
+  // one text field: label above, black box, focus ring, blinking caret. Used by the world
+  // creator, Add Server, Direct Connect and the Account screen so they all match.
+  inputBox(label, value, yy, focused, id, w = 200, cx = null) {
+    const bx = (cx == null ? this.W() / 2 : cx) - w / 2, by = yy + 10;
+    if (label) this.text(label, bx, yy, '#a0a0a0');
+    this.rect(bx, by, w, 20, '#000000');
+    const ec = focused ? '#ffffff' : '#707070';
+    this.rect(bx, by, w, 1, ec); this.rect(bx, by + 19, w, 1, ec);
+    this.rect(bx, by, 1, 20, ec); this.rect(bx + w - 1, by, 1, 20, ec);
+    const cursor = focused && ((performance.now() / 400) | 0) % 2 === 0 ? '_' : '';
+    this.text(this.fit(value + cursor, w - 8), bx + 4, by + 6);
+    this.buttons.push({ id, x: bx, y: by, w, h: 20 });
+    return by;
   },
   slider(id, x, y, w, label, value) {
     this.rect(x, y, w, 20, '#000000aa');
@@ -13185,6 +13293,7 @@ const UI = {
     if (Game.state === 'title') return this.clickButtons();
     if (Game.state === 'create') return this.clickButtons();
     if (Game.state === 'mp') return this.clickButtons();
+    if (Game.state === 'account') return this.clickButtons();
     if (Game.state === 'mods') return this.clickButtons();
     if (Game.state === 'worlds') return this.clickButtons();
     if (Game.state === 'dead' || Game.state === 'win') return this.clickButtons();
@@ -13284,11 +13393,12 @@ const UI = {
     if (this.dragSlider && this.mouseDown) this.updateSlider();
     const W = this.W(), H = this.H();
     // the file-picker input only overlays the Multiplayer screen's Upload Skin button
-    if (game.state !== 'mp' && game.hideSkinInput) game.hideSkinInput();
+    if (game.state !== 'account' && game.hideSkinInput) game.hideSkinInput();
     if (game.state === 'title') return this.drawTitle(game);
     if (game.state === 'worlds') return this.drawWorlds(game);
     if (game.state === 'create') return this.drawCreate(game);
     if (game.state === 'mp') return this.drawMultiplayer(game);
+    if (game.state === 'account') return this.drawAccount(game);
     if (game.state === 'mods') return this.drawMods(game);
     if (game.state === 'loading') return this.drawLoading(game);
     if (game.state === 'win') return this.drawCredits(game, dt);
@@ -13766,6 +13876,13 @@ const UI = {
     this.button('mods_menu', bx, by, 200, 'Mods...');
     by += 24;
     this.button('options_title', bx, by, 200, 'Options...');
+    // account button, top-left: your face, your name, your skin (see drawAccount)
+    const ah = 22, aw = Math.min(120, 30 + Font.width(game.mpMyName()));
+    const ahover = this.mx >= 3 && this.mx < 3 + aw && this.my >= 3 && this.my < 3 + ah;
+    this.rect(3, 3, aw, ah, ahover ? 'rgba(60,60,60,0.8)' : 'rgba(0,0,0,0.55)');
+    this.drawSkinFace(6, 6, 16);
+    this.text(this.fit(game.mpMyName(), aw - 28), 26, 10, ahover ? '#ffffa0' : '#e0e0e0');
+    this.buttons.push({ id: 'account_menu', x: 3, y: 3, w: aw, h: ah });
     this.text('Minecraft JS Edition', 2, H - 10, '#ffffff');
     this.text('A tribute recreation', W - Font.width('A tribute recreation') - 2, H - 10, '#ffffff');
   },
@@ -13820,19 +13937,8 @@ const UI = {
     this.dirtBg();
     const W = this.W(), H = this.H();
     this.textC('Create New World', W / 2, H * 0.12);
-    const inputBox = (label, value, yy, focused, id) => {
-      this.text(label, W / 2 - 100, yy, '#a0a0a0');
-      const bx = W / 2 - 100, by = yy + 10;
-      this.rect(bx, by, 200, 20, '#000000');
-      const ec = focused ? '#ffffff' : '#707070';
-      this.rect(bx, by, 200, 1, ec); this.rect(bx, by + 19, 200, 1, ec);
-      this.rect(bx, by, 1, 20, ec); this.rect(bx + 199, by, 1, 20, ec);
-      const cursor = focused && ((performance.now() / 400) | 0) % 2 === 0 ? '_' : '';
-      this.text(value + cursor, bx + 4, by + 6);
-      this.buttons.push({ id, x: bx, y: by, w: 200, h: 20 });
-    };
-    inputBox('World Name', this.nameInput, H * 0.24, this.createFocus === 'name', 'focus_name');
-    inputBox('Seed for the world generator', this.seedInput, H * 0.24 + 42, this.createFocus === 'seed', 'focus_seed');
+    this.inputBox('World Name', this.nameInput, H * 0.24, this.createFocus === 'name', 'focus_name');
+    this.inputBox('Seed for the world generator', this.seedInput, H * 0.24 + 42, this.createFocus === 'seed', 'focus_seed');
     this.textC('Leave name/seed blank for defaults', W / 2, H * 0.24 + 78, '#808080');
     this.button('create_mode', W / 2 - 100, H * 0.24 + 92, 200, 'Game Mode: ' + (this.createMode === 'creative' ? 'Creative' : 'Survival'));
     this.textC(this.createMode === 'creative'
@@ -13845,56 +13951,179 @@ const UI = {
     this.button('create_go', W / 2 - 100, cby, 200, 'Create New World');
     this.button('create_back', W / 2 - 100, cby + 24, 200, 'Cancel');
   },
+  // 24px checkerboard stand-in for a server icon. Vanilla shows the server's own icon;
+  // nothing here can fetch one, and every texture in this project is generated anyway.
+  // Built once and cached beside the dirt tile (same trick as dirtBg).
+  serverIcon() {
+    return Tex.icons.__serverIcon || (Tex.icons.__serverIcon = (() => {
+      const cv = document.createElement('canvas'); cv.width = cv.height = 16;
+      const c = cv.getContext('2d');
+      for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+        c.fillStyle = (((x >> 2) + (y >> 2)) & 1) ? '#6a6a72' : '#3d3d44';
+        c.fillRect(x, y, 1, 1);
+      }
+      c.fillStyle = '#22222a';
+      c.fillRect(0, 0, 16, 1); c.fillRect(0, 15, 16, 1);
+      c.fillRect(0, 0, 1, 16); c.fillRect(15, 0, 1, 16);
+      return cv;
+    })());
+  },
+  // signal-strength bars, vanilla's right-hand glyph. Five bars, as many lit as the
+  // round-trip deserves; all dark when the server did not answer at all.
+  signalBars(x, y, ping) {
+    const lit = (!ping || ping.state !== 'up') ? 0
+      : ping.ms < 100 ? 5 : ping.ms < 200 ? 4 : ping.ms < 400 ? 3 : ping.ms < 800 ? 2 : 1;
+    const col = lit >= 4 ? '#55ff55' : lit >= 2 ? '#ffff55' : '#ff5555';
+    for (let i = 0; i < 5; i++) {
+      const h = 2 + i * 2;
+      this.rect(x + i * 3, y + 10 - h, 2, h, i < lit ? col : '#4a4a4a');
+    }
+  },
+  // The Multiplayer screen is vanilla's shape now: a list of servers you have added, plus
+  // Direct Connect for a friend's 6-digit room code. Four sub-screens in one Game.state,
+  // switched by this.mpScreen (see that field for why it is not a state of its own).
   drawMultiplayer(game) {
     this.dirtBg();
-    const W = this.W(), H = this.H();
-    this.textC('Join a Friend', W / 2, H * 0.08);
     const N = (typeof Net !== 'undefined') ? Net : null;
     const status = N ? N.status : 'idle';
-    const bx = W / 2 - 100;
-
-    if (N && status === 'connected' && N.role === 'guest') {
+    // a live attempt owns the screen, whichever sub-screen started it. When it fails the
+    // status goes back to error/closed and we drop straight back where we were.
+    if (N && (status === 'connecting' || status === 'joining' ||
+      (status === 'connected' && N.role === 'guest'))) return this.drawMpConnecting(game, status);
+    if (this.mpScreen === 'add') return this.drawMpAdd(game);
+    if (this.mpScreen === 'direct') return this.drawMpDirect(game);
+    return this.drawMpList(game);
+  },
+  drawMpList(game) {
+    const W = this.W(), H = this.H();
+    const N = (typeof Net !== 'undefined') ? Net : null;
+    this.textC('Play Multiplayer', W / 2, 8);
+    // which name you turn up as. It lives on the Account screen now, so without this
+    // there is nowhere on the way into a game that tells you.
+    this.textC('Playing as: ' + game.mpMyName(), W / 2, 20, '#909090');
+    const lw = Math.min(300, W - 20);
+    const lx = W / 2 - lw / 2;
+    const by = H - 52;
+    let y = 32;
+    const servers = game.mpServers();
+    const maxRows = Math.max(1, floor((by - y - 14) / 30));
+    for (const s of servers.slice(0, maxRows)) {
+      const rowSel = this.mpSel === s.id;
+      const hover = this.mx >= lx && this.mx < lx + lw && this.my >= y && this.my < y + 28;
+      this.rect(lx, y, lw, 28, hover ? 'rgba(30,30,30,0.75)' : 'rgba(0,0,0,0.6)');
+      if (rowSel) {
+        this.rect(lx - 1, y - 1, lw + 2, 1, '#ffffff'); this.rect(lx - 1, y + 28, lw + 2, 1, '#ffffff');
+        this.rect(lx - 1, y - 1, 1, 30, '#ffffff'); this.rect(lx + lw, y - 1, 1, 30, '#ffffff');
+      }
+      const sc = this.scale;
+      this.ctx.drawImage(this.serverIcon(), (lx + 2) * sc, (y + 2) * sc, 24 * sc, 24 * sc);
+      // right-hand status column: the player count over the signal bars
+      const p = s.ping || {};
+      let right = '', rcol = '#909090', sub = s.addr, scol = '#909090';
+      if (p.state === 'up') { right = p.online + '/' + p.max; rcol = '#ffffff'; sub = p.motd || s.addr; }
+      else if (p.state === 'pinging') { right = '...'; sub = 'Pinging...'; }
+      else if (p.state === 'blocked') { right = '!'; rcol = '#ffaa00'; sub = 'Needs a wss:// address on an https page'; scol = '#ffaa00'; }
+      else if (p.state === 'down') { right = '?'; rcol = '#ff5555'; sub = 'Cannot reach this server'; scol = '#ff5555'; }
+      const rw = Math.max(Font.width(right) + 4, 19);
+      this.text(right, lx + lw - 4 - Font.width(right), y + 3, rcol);
+      if (p.state === 'up') this.signalBars(lx + lw - 19, y + 14, p);
+      const tw = lw - 30 - rw - 6;
+      this.text(this.fit(s.name || s.addr, tw), lx + 30, y + 3, '#ffffff');
+      this.text(this.fit(sub, tw), lx + 30, y + 15, scol);
+      this.buttons.push({ id: 'msel_' + s.id, x: lx, y, w: lw, h: 28 });
+      y += 30;
+    }
+    if (!servers.length) {
+      this.textC('No servers yet', W / 2, H * 0.32, '#ffffff');
+      this.textC('Add Server saves one for next time, or use', W / 2, H * 0.32 + 12, '#a0a0a0');
+      this.textC('Direct Connection for a friend 6-digit code', W / 2, H * 0.32 + 22, '#a0a0a0');
+    } else if (servers.length > maxRows) {
+      this.textC('+' + (servers.length - maxRows) + ' more (window too short)', W / 2, y + 2, '#909090');
+    }
+    if (N && N.errorMsg) this.textC(this.fit(N.errorMsg, W - 8), W / 2, by - 12, '#ff5555');
+    else if (this.mpNotice) this.textC(this.fit(this.mpNotice, W - 8), W / 2, by - 12, '#ffaa00');
+    // row 1: three wide, row 2: four narrow — vanilla's arrangement
+    const g = 4, w3 = (lw - g * 2) / 3, w4 = (lw - g * 3) / 4;
+    const has = servers.some((s) => s.id === this.mpSel);
+    if (has) this.button('mp_join_server', lx, by, w3, 'Join Server');
+    else this.buttonOff(lx, by, w3, 'Join Server');
+    this.button('mp_direct', lx + w3 + g, by, w3, 'Direct Connection');
+    this.button('mp_add', lx + (w3 + g) * 2, by, w3, 'Add Server');
+    if (has) this.button('mp_edit', lx, by + 24, w4, 'Edit');
+    else this.buttonOff(lx, by + 24, w4, 'Edit');
+    if (has) this.button('mp_delete', lx + w4 + g, by + 24, w4, 'Delete');
+    else this.buttonOff(lx + w4 + g, by + 24, w4, 'Delete');
+    this.button('mp_refresh', lx + (w4 + g) * 2, by + 24, w4, 'Refresh');
+    this.button('mp_back', lx + (w4 + g) * 3, by + 24, w4, 'Cancel');
+  },
+  drawMpAdd(game) {
+    const W = this.W(), H = this.H();
+    this.textC(this.mpEditId != null ? 'Edit Server' : 'Add Server', W / 2, H * 0.1);
+    this.inputBox('Server Name', this.srvName, H * 0.26, this.srvFocus === 'name', 'srv_focus_name');
+    this.inputBox('Server Address', this.srvAddr, H * 0.26 + 42, this.srvFocus === 'addr', 'srv_focus_addr');
+    // what they typed is really dialled as this — worth showing, since the scheme and the
+    // default port both get filled in for them
+    const norm = (typeof Net !== 'undefined' && this.srvAddr.trim()) ? Net.normalizeAddr(this.srvAddr) : '';
+    this.textC(norm ? this.fit(norm, W - 8) : 'for example  82.22.82.23:8140', W / 2, H * 0.26 + 78, '#808080');
+    if (this.srvError) this.textC(this.fit(this.srvError, W - 8), W / 2, H * 0.26 + 90, '#ff5555');
+    const cby = Math.max(H * 0.62, H * 0.26 + 104);
+    this.button('srv_done', W / 2 - 100, cby, 200, 'Done');
+    this.button('srv_cancel', W / 2 - 100, cby + 24, 200, 'Cancel');
+  },
+  drawMpDirect(game) {
+    const W = this.W(), H = this.H();
+    const N = (typeof Net !== 'undefined') ? Net : null;
+    this.textC('Direct Connect', W / 2, H * 0.1);
+    this.textC('Ask your friend to host, then enter their code', W / 2, H * 0.22, '#c0c0c0');
+    this.inputBox('Enter 6-digit code', this.mpCode, H * 0.34, true, 'mp_focus_code');
+    if (N && N.errorMsg) this.textC(this.fit(N.errorMsg, W - 8), W / 2, H * 0.34 + 36, '#ff5555');
+    const cby = Math.max(H * 0.56, H * 0.34 + 50);
+    this.button('mp_join', W / 2 - 100, cby, 200, 'Join Server');
+    this.button('mp_direct_back', W / 2 - 100, cby + 24, 200, 'Cancel');
+    this.textC('To host your own world: open it, then Pause -> Host', W / 2, H - 44, '#909090');
+  },
+  drawMpConnecting(game, status) {
+    const W = this.W(), H = this.H();
+    if (status === 'connected') {
       this.textC('Connected!', W / 2, H * 0.32, '#55ff55');
       this.textC('Waiting for the world from the host...', W / 2, H * 0.42, '#ffffff');
-      this.button('mp_back', bx, H * 0.6, 200, 'Cancel');
-      return;
+    } else {
+      this.textC('Connecting...', W / 2, H * 0.32, '#ffff55');
+      if (game.mpTarget) this.textC(this.fit(game.mpTarget, W - 8), W / 2, H * 0.42, '#c0c0c0');
     }
-
-    this.textC('Ask your friend to host, then enter their code', W / 2, H * 0.18, '#c0c0c0');
-    // your-name field (shown above your head to the other player)
-    this.text('Your Name', bx, H * 0.24, '#a0a0a0');
-    const ny = H * 0.24 + 10;
-    this.rect(bx, ny, 200, 20, '#000000');
-    const nfoc = this.mpFocus === 'name';
-    const nec = nfoc ? '#ffffff' : '#707070';
-    this.rect(bx, ny, 200, 1, nec); this.rect(bx, ny + 19, 200, 1, nec);
-    this.rect(bx, ny, 1, 20, nec); this.rect(bx + 199, ny, 1, 20, nec);
-    const ncur = nfoc && ((performance.now() / 400) | 0) % 2 === 0 ? '_' : '';
-    this.textScaled((Game.mpName || '') + ncur, bx + 4, ny + 4, '#ffffff', 1.5);
-    this.buttons.push({ id: 'mp_focus_name', x: bx, y: ny, w: 200, h: 20 });
-    // custom-skin upload — the real <input type=file> is parked on top of this button
-    // so phone taps hit it directly (mobile blocks synthetic .click() pickers)
-    this.button('mp_upload_skin', bx, H * 0.24 + 34, 200, Game.hasSkin ? 'Change Skin (PNG)' : 'Upload Skin (PNG)');
-    Game.placeSkinInput(bx, H * 0.24 + 34, 200, 20);
-    if (Game.hasSkin) this.text('skin loaded', bx + 204, H * 0.24 + 40, '#55ff55');
-    // join code field
-    this.text('Join Code (6 digits)', bx, H * 0.40, '#a0a0a0');
-    const iy = H * 0.40 + 10;
-    this.rect(bx, iy, 200, 20, '#000000');
-    const focused = this.mpFocus === 'code';
-    const ec = focused ? '#ffffff' : '#707070';
-    this.rect(bx, iy, 200, 1, ec); this.rect(bx, iy + 19, 200, 1, ec);
-    this.rect(bx, iy, 1, 20, ec); this.rect(bx + 199, iy, 1, 20, ec);
-    const cursor = focused && ((performance.now() / 400) | 0) % 2 === 0 ? '_' : '';
-    this.textScaled((this.mpCode || '') + cursor, bx + 4, iy + 4, '#ffffff', 1.5);
-    this.buttons.push({ id: 'mp_focus_code', x: bx, y: iy, w: 200, h: 20 });
-    this.button('mp_join', bx, H * 0.40 + 36, 200, 'Join Game');
-
-    if (status === 'connecting' || status === 'joining') this.textC('Connecting...', W / 2, H * 0.56, '#ffff55');
-    if (N && N.errorMsg) this.textC(N.errorMsg, W / 2, H * 0.56, '#ff5555');
-    else if (this.mpNotice) this.textC(this.mpNotice, W / 2, H * 0.56, '#ffaa00');
-    this.textC('To host your own world: open it, then Pause -> Host', W / 2, H * 0.72, '#909090');
-    this.button('mp_back', W / 2 - 100, H - 30, 200, 'Back');
+    this.button('mp_cancel', W / 2 - 100, H * 0.6, 200, 'Cancel');
+  },
+  // Your identity, the way the modern launcher does it: name and skin in one place,
+  // reached from the head button in the corner of the title screen.
+  drawAccount(game) {
+    this.dirtBg();
+    const W = this.W(), H = this.H();
+    this.textC('Account', W / 2, H * 0.1);
+    this.drawSkinFace(W / 2 - 16, H * 0.2, 32);
+    this.inputBox('Your Name', game.mpName || '', H * 0.36, this.accountFocus === 'name', 'acc_focus_name');
+    this.textC('Shown above your head to other players', W / 2, H * 0.36 + 34, '#808080');
+    const sy = H * 0.36 + 46;
+    this.button('acc_upload_skin', W / 2 - 100, sy, 200, game.hasSkin ? 'Change Skin (PNG)' : 'Upload Skin (PNG)');
+    // the real <input type=file> is parked on top of this button so phone taps hit it
+    // directly (mobile browsers refuse a synthetic .click() picker)
+    game.placeSkinInput(W / 2 - 100, sy, 200, 20);
+    if (game.hasSkin) {
+      this.textC('Skin loaded', W / 2, sy + 24, '#55ff55');
+      this.button('acc_clear_skin', W / 2 - 100, sy + 34, 200, 'Use Default Skin');
+    } else {
+      this.textC('64x32 or 64x64 Minecraft skin', W / 2, sy + 24, '#808080');
+    }
+    this.button('acc_done', W / 2 - 100, H - 30, 200, 'Done');
+  },
+  // The 8x8 face out of the self-skin region of the mob atlas, blown up. Falls back to
+  // the checkerboard if the atlas is not there (it always is by the time this screen can
+  // be opened, but the atlas is exactly what the headless server stubs out).
+  drawSkinFace(x, y, size) {
+    const s = this.scale;
+    const r = (typeof MobTexRegions !== 'undefined') ? MobTexRegions['skin_self'] : null;
+    this.rect(x - 1, y - 1, size + 2, size + 2, '#000000');
+    if (r && Tex.mobCanvas) this.ctx.drawImage(Tex.mobCanvas, r[0] + 8, r[1] + 8, 8, 8, x * s, y * s, size * s, size * s);
+    else this.ctx.drawImage(this.serverIcon(), x * s, y * s, size * s, size * s);
   },
   // Every .js file found in the mods/ folder, each with its own ON/OFF. The list is whatever
   // Mods.scan() discovered — this screen never knows the name of any particular mod.
@@ -14140,16 +14369,40 @@ const HUD_ICONS = {
 'use strict';
 // ============ chat.js — T chat, slash commands, tab-complete suggestions ============
 
+// ---------- permission levels ----------
+// On a DEDICATED SERVER a player is one of three things, and the server says which by sending
+// a `perm` message on join (Game.mpPerm). Singleplayer and a world hosted from somebody's
+// browser leave mpPerm at 'owner', so nothing there is restricted — this only ever narrows
+// what you can do on somebody else's server.
+//
+//   owner  (exactly one)  everything
+//   op     (up to five)   /heal and /kill
+//   player                /help and /seed
+//
+// Each command carries the level it needs. A command with no `level` is owner-only: a new
+// command should have to opt IN to being available to everyone, not opt out.
+const CMD_RANK = { player: 0, op: 1, owner: 2 };
+
 // ---------- command registry ----------
 const Commands = {
   defs: {
     help: {
+      level: 'player',
       usage: '/help', desc: 'Show all commands',
       run() {
+        // only list what this player can actually run — a list full of commands that answer
+        // "you may not do that" is worse than a short list
+        let n = 0;
         for (const k of Object.keys(Commands.defs)) {
           const d = Commands.defs[k];
+          if (!Commands.allowed(d)) continue;
           UI.msg(d.usage + ' - ' + d.desc, '#aaaaaa');
+          n++;
         }
+        if (Commands.level() !== 'owner') {
+          UI.msg('You are: ' + Commands.level() + ' on this server', '#909090');
+        }
+        if (!n) UI.msg('No commands available to you here', '#909090');
       },
     },
     give: {
@@ -14231,14 +14484,23 @@ const Commands = {
         const loz = Math.min(c[2], c[5]), hiz = Math.max(c[2], c[5]);
         const vol = (hix - lox + 1) * (hiy - loy + 1) * (hiz - loz + 1);
         if (vol > 32768) { UI.msg('Too many blocks (' + vol + ', max 32768)', '#ff5555'); return; }
+        // Wrapped in a capture window, like every other way blocks change. Without this the
+        // setBlocks below went nowhere but this one screen: Game.mpCapturing stayed null, so
+        // nothing was collected and nothing was sent — /fill looked like it worked and then
+        // vanished on the next join, for everyone including the person who typed it.
         let n = 0;
-        for (let x = lox; x <= hix; x++) for (let y = loy; y <= hiy; y++) for (let z = loz; z <= hiz; z++) {
-          const edge = x === lox || x === hix || y === loy || y === hiy || z === loz || z === hiz;
-          let placeId = id, doPlace = true;
-          if (mode === 'keep') doPlace = w.getBlock(x, y, z) === B.AIR;
-          else if (mode === 'outline') doPlace = edge;
-          else if (mode === 'hollow') placeId = edge ? id : B.AIR;
-          if (doPlace) { w.setBlock(x, y, z, placeId, 0); n++; }
+        Game.mpBeginEdit();
+        try {
+          for (let x = lox; x <= hix; x++) for (let y = loy; y <= hiy; y++) for (let z = loz; z <= hiz; z++) {
+            const edge = x === lox || x === hix || y === loy || y === hiy || z === loz || z === hiz;
+            let placeId = id, doPlace = true;
+            if (mode === 'keep') doPlace = w.getBlock(x, y, z) === B.AIR;
+            else if (mode === 'outline') doPlace = edge;
+            else if (mode === 'hollow') placeId = edge ? id : B.AIR;
+            if (doPlace) { w.setBlock(x, y, z, placeId, 0); n++; }
+          }
+        } finally {
+          Game.mpEndEdit(true);   // true = came from a command, so the server can gate it
         }
         UI.msg(n ? ('Filled ' + n + ' block' + (n === 1 ? '' : 's')) : 'No blocks filled');
       },
@@ -14257,6 +14519,13 @@ const Commands = {
         if (val === undefined) { UI.msg('Usage: ' + this.usage, '#ff5555'); return; }
         const t = NAMED[val] !== undefined ? NAMED[val] : parseInt(val);
         if (isNaN(t)) { UI.msg('Invalid time: ' + val, '#ff5555'); return; }
+        // The server owns the clock and streams it back every 1.5s (the `env` message), so a
+        // guest setting it locally would watch it snap back a moment later. Ask instead.
+        if (Game.isGuest && Net.connected) {
+          Game.mpSendWorldCommand({ c: 'time', v: t, add: mode === 'add' ? 1 : 0 });
+          UI.msg('Time set to ' + ((t % 24000) + 24000) % 24000);
+          return;
+        }
         if (mode === 'add') Game.time += t;
         else Game.time = Math.floor(Game.time / 24000) * 24000 + ((t % 24000) + 24000) % 24000;
         UI.msg('Time set to ' + Math.floor(Game.time % 24000));
@@ -14274,15 +14543,24 @@ const Commands = {
         if (!type || !MOB_CLASSES[type]) { UI.msg('Unknown mob: ' + (type || '(none)'), '#ff5555'); return; }
         const n = clamp(parseInt(a[1] || '1') || 1, 1, 20);
         const p = Game.player, dir = p.lookDir();
-        for (let i = 0; i < n; i++) spawnMob(Game.world, type, p.x + dir[0] * 4, p.y + 1, p.z + dir[2] * 4);
+        const sx = p.x + dir[0] * 4, sy = p.y + 1, sz = p.z + dir[2] * 4;
+        for (let i = 0; i < n; i++) {
+          // As a guest this goes to the server rather than creating a local ghost (spawnMob
+          // redirects on its own). Flagged so the server can tell a /spawn from a spawn egg.
+          if (Game.isGuest && Net.connected) Game.mpSpawnRequest('mob', { mt: type, x: sx, y: sy, z: sz }, true);
+          else spawnMob(Game.world, type, sx, sy, sz);
+        }
         UI.msg('Spawned ' + n + ' ' + type);
       },
     },
     kill: {
+      // an op's escape hatch: stuck in a wall, fallen somewhere with no way out
+      level: 'op',
       usage: '/kill', desc: 'Kill yourself',
       run() { const p = Game.player; p.hp = 0; p.die(); UI.msg('Ouch! That looks like it hurt'); },
     },
     heal: {
+      level: 'op',
       usage: '/heal', desc: 'Restore health and hunger',
       run() {
         const p = Game.player;
@@ -14301,6 +14579,7 @@ const Commands = {
       },
     },
     seed: {
+      level: 'player',
       usage: '/seed', desc: 'Show the world seed',
       run() { UI.msg('Seed: ' + Game.seed); },
     },
@@ -14323,6 +14602,12 @@ const Commands = {
         if (!state) { UI.msg('Usage: ' + this.usage, '#ff5555'); return; }
         let dur;
         if (a[1] !== undefined) { dur = parseFloat(a[1]); if (isNaN(dur)) { UI.msg('Invalid duration: ' + a[1], '#ff5555'); return; } }
+        // Same as /time: the host owns the weather and re-broadcasts it, so a guest has to ask.
+        if (Game.isGuest && Net.connected) {
+          Game.mpSendWorldCommand({ c: 'weather', s: state, d: dur });
+          UI.msg('Set the weather to ' + state);
+          return;
+        }
         Weather.set(state, dur);
         const label = state === 'clear' ? 'clear' : state === 'thunder' ? 'thunder'
           : (Weather.snowing ? 'snowfall' : 'rain');
@@ -14344,11 +14629,25 @@ const Commands = {
   },
   _itemIds: null,
   itemIds() { return this._itemIds || (this._itemIds = Object.keys(Items).sort()); },
+  /** Our own level. 'owner' anywhere except a dedicated server that said otherwise. */
+  level() { return (typeof Game !== 'undefined' && Game.mpPerm) || 'owner'; },
+  /** May we run this command? Missing `level` means owner-only — see the note at the top. */
+  allowed(cmd) {
+    return CMD_RANK[this.level()] >= CMD_RANK[cmd && cmd.level ? cmd.level : 'owner'];
+  },
   run(text) {
     const parts = text.slice(1).trim().split(/\s+/);
     const name = (parts[0] || '').toLowerCase();
     const cmd = this.defs[name];
     if (!cmd) { UI.msg('Unknown command: /' + name + ' (try /help)', '#ff5555'); return; }
+    // The single gate for every command, because this is the only place a command is ever
+    // started from (Chat.submit). The server checks again for anything that touches the shared
+    // world — this half is here so it says why instead of silently doing nothing.
+    if (!this.allowed(cmd)) {
+      const need = cmd.level || 'owner';
+      UI.msg('/' + name + ' needs ' + need + ' on this server — you are ' + this.level(), '#ff5555');
+      return;
+    }
     try { cmd.run(parts.slice(1)); }
     catch (err) { UI.msg('Command error: ' + err.message, '#ff5555'); }
   },
@@ -14436,12 +14735,12 @@ const Chat = {
     const toks = inp.slice(1).split(' ');
     const last = toks[toks.length - 1].toLowerCase();
     if (toks.length === 1) {
-      // completing the command name itself
+      // completing the command name itself — never offer one this player cannot run
       this.suggestions = Object.keys(Commands.defs).sort()
-        .filter(c => c.startsWith(last)).map(c => '/' + c);
+        .filter(c => c.startsWith(last) && Commands.allowed(Commands.defs[c])).map(c => '/' + c);
     } else {
       const def = Commands.defs[toks[0].toLowerCase()];
-      if (!def || !def.complete) return;
+      if (!def || !def.complete || !Commands.allowed(def)) return;
       const args = toks.slice(1);
       const cands = def.complete(args.length - 1, args) || [];
       this.sugStart = inp.lastIndexOf(' ') + 1;
@@ -14549,9 +14848,51 @@ const Net = {
     // any time with ?relay=wss://... or localStorage.mcpe_relay_url.
     return 'wss://mcpe-multiplayer-relay.onrender.com';
   },
-  setRelayUrl(url) {
+  // `persist` false = use this URL for THIS connection only. A saved server from the
+  // server list must not become the default relay: `defaultRelayUrl()` reads
+  // mcpe_relay_url back, so remembering a dedicated server here would silently make
+  // Direct Connect dial that server instead of the public relay ever after.
+  setRelayUrl(url, persist = true) {
     this.relayUrl = url;
+    if (!persist) return;
     try { localStorage.setItem('mcpe_relay_url', url); } catch (e) {}
+  },
+
+  // ---- server addresses (the Add Server field) ----
+  // What a player types is vanilla-shaped ("82.22.82.23:8140", "play.example.com"),
+  // not a WebSocket URL. Turn it into one.
+  //  ws:// wss://      -> as typed
+  //  http:// https://  -> the matching ws scheme
+  //  host[:port]       -> wss:// on an https page (ws:// would be blocked as mixed
+  //                       content), ws:// otherwise
+  // A missing port only gets :8140 (the dedicated server's default) on the ws:// side —
+  // a wss:// address is behind a reverse proxy on 443, where naming a port would break it.
+  normalizeAddr(s) {
+    let a = String(s == null ? '' : s).trim();
+    if (!a) return '';
+    if (/^wss?:\/\//i.test(a)) return a;
+    if (/^https:\/\//i.test(a)) return 'wss://' + a.slice(8);
+    if (/^http:\/\//i.test(a)) return 'ws://' + a.slice(7);
+    const secure = (typeof location !== 'undefined' && location.protocol === 'https:');
+    if (secure) return 'wss://' + a;
+    // host / host:port / host:port/path — only add the default port when there is
+    // neither a port nor a path to be confused by
+    if (!/[:/]/.test(a)) a += ':8140';
+    return 'ws://' + a;
+  },
+  // the server's public status endpoint (see dedicated/server.js) for the same host
+  healthUrl(wsUrl) {
+    const u = this.normalizeAddr(wsUrl);
+    if (!u) return '';
+    const http = u.replace(/^ws/i, 'http').replace(/\/+$/, '');
+    return http + '/health';
+  },
+  // an https page cannot open a ws:// socket or fetch http:// — the browser blocks both
+  // as mixed content. Worth naming, because it is exactly the state of every dedicated
+  // server until it has TLS in front of it.
+  isMixedBlocked(addr) {
+    if (typeof location === 'undefined' || location.protocol !== 'https:') return false;
+    return /^ws:\/\//i.test(this.normalizeAddr(addr));
   },
 
   on(type, fn) {
@@ -14651,8 +14992,10 @@ const Net = {
     this.slots = Math.max(2, Math.min(10, n));
     if (this.role === 'host') this.send('slots', { n: this.slots });
   },
-  join(url, code) {
-    this.setRelayUrl(url);
+  // opts.remember=false for a one-off address (a row from the saved server list) so it
+  // does not become the default relay — see setRelayUrl
+  join(url, code, opts) {
+    this.setRelayUrl(url, !opts || opts.remember !== false);
     const ws = this._connect(url);
     if (!ws) return;
     ws.addEventListener('open', () => ws.send(JSON.stringify({ t: 'join', code: String(code).trim() })), { once: true });
@@ -15503,11 +15846,13 @@ const Mobile = {
     if (this.game.state === 'win') { this.game.skipCredits(); return; }
     UI.onMouseDown(0, false);
     // world-create text fields → pop the iOS keyboard for the tapped field
-    if (this.game.state === 'create') {
+    // text fields on the menu screens → pop the iOS keyboard for the tapped field
+    if (this.game.state === 'create' || this.game.state === 'mp' || this.game.state === 'account') {
+      const KB = { focus_name: 'name', focus_seed: 'seed', srv_focus_name: 'srvname',
+        srv_focus_addr: 'srvaddr', mp_focus_code: 'mpcode', acc_focus_name: 'mpname' };
       for (const b of UI.buttons) {
         if (UI.mx >= b.x && UI.mx < b.x + b.w && UI.my >= b.y && UI.my < b.y + b.h) {
-          if (b.id === 'focus_name') this.openKeyboard('name');
-          else if (b.id === 'focus_seed') this.openKeyboard('seed');
+          if (KB[b.id]) this.openKeyboard(KB[b.id]);
           break;
         }
       }
@@ -15578,10 +15923,13 @@ const Mobile = {
     else if (target === 'seed') el.value = UI.seedInput || '';
     else if (target === 'mpcode') el.value = UI.mpCode || '';
     else if (target === 'mpname') el.value = Game.mpName || '';
+    else if (target === 'srvname') el.value = UI.srvName || '';
+    else if (target === 'srvaddr') el.value = UI.srvAddr || '';
     else if (target === 'sign') el.value = (UI.signBE && UI.signBE.lines[UI.signLine]) || '';
     el.maxLength = target === 'chat' ? 100
-      : target === 'mpcode' ? 6 : target === 'mpname' ? 16 : target === 'sign' ? SIGN_MAX_CHARS : 24;
-    el.inputMode = target === 'mpcode' ? 'numeric' : 'text';
+      : target === 'mpcode' ? 6 : target === 'mpname' ? 16 : target === 'srvname' ? 32
+      : target === 'srvaddr' ? 120 : target === 'sign' ? SIGN_MAX_CHARS : 24;
+    el.inputMode = target === 'mpcode' ? 'numeric' : target === 'srvaddr' ? 'url' : 'text';
     el.setAttribute('enterkeyhint', target === 'chat' ? 'send' : (target === 'mpcode' ? 'go' : 'done'));
     // focus must run inside the same user gesture for iOS to raise the keyboard
     try { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } catch (e) {}
@@ -15594,6 +15942,8 @@ const Mobile = {
     else if (this.kbTarget === 'seed') { UI.seedInput = v.slice(0, 24); }
     else if (this.kbTarget === 'mpcode') { UI.mpCode = v.replace(/[^0-9]/g, '').slice(0, 6); }
     else if (this.kbTarget === 'mpname') { Game.mpName = v.slice(0, 16); Game.mpSaveName(); }
+    else if (this.kbTarget === 'srvname') { UI.srvName = v.slice(0, 32); }
+    else if (this.kbTarget === 'srvaddr') { UI.srvAddr = v.slice(0, 120); }
     else if (this.kbTarget === 'sign' && UI.signBE) { UI.signBE.lines[UI.signLine] = v.slice(0, SIGN_MAX_CHARS); }
   },
   // the hidden <input> only ever holds ONE line, so switching lines has to reload it
@@ -15607,7 +15957,9 @@ const Mobile = {
       e.preventDefault();
       if (this.kbTarget === 'chat') { Chat.submit(); this.closeKeyboard(); }
       else if (this.kbTarget === 'mpcode') { this.closeKeyboard(); this.game.onButton('mp_join'); }
-      else if (this.kbTarget === 'mpname') { this.closeKeyboard(); UI.mpFocus = 'code'; }
+      else if (this.kbTarget === 'mpname') { this.closeKeyboard(); this.game.onButton('acc_done'); }
+      else if (this.kbTarget === 'srvname') { UI.srvFocus = 'addr'; this.openKeyboard('srvaddr'); }
+      else if (this.kbTarget === 'srvaddr') { this.closeKeyboard(); this.game.onButton('srv_done'); }
       // Enter on a sign moves to the next line instead of closing (4 lines, one keyboard)
       else if (this.kbTarget === 'sign') { UI.signLine = (UI.signLine + 1) % SIGN_LINES; this.syncSignLine(); }
       else { this.closeKeyboard(); this.game.onButton('create_go'); }
@@ -15920,6 +16272,14 @@ const Game = {
   mpDropTracked: new Map(),   // same, for the ground-item channel (separate nid space)
   _entResyncAt: 0,
   hasSkin: false, mySkinData: null, _skinInput: null, _skinInputRect: null,
+  // A dedicated server's Game.player is an invisible anchor at world spawn, not a person.
+  // dedicated/headless.js sets this so playerAnchors() leaves it out and nothing in the
+  // simulation treats it as somebody standing there. Always false in a browser.
+  serverAnchorHidden: false,
+  // What slash commands we may use: 'owner' | 'op' | 'player'. Only a DEDICATED SERVER ever
+  // lowers this, by sending a `perm` message on join — so singleplayer and a world hosted from
+  // somebody's browser behave exactly as they always have, with every command available.
+  mpPerm: 'owner',
   mpSlots: 4, // room size the host offers (total players, us included)
   // guest: the host's render distance = the ceiling on ours (0 = not capped). See renderDist.
   mpRDCap: 0, _sentRDCap: null,
@@ -16111,6 +16471,9 @@ const Game = {
     Net.on('dropReq', (m) => this.onRemoteDropReq(m)); // host: a guest asked us to spawn a drop
     Net.on('drops', (m) => this.onRemoteDrops(m));      // guest: host's authoritative drop list
     Net.on('give', (m) => this.onRemoteGive(m));        // guest: host handed us a picked-up stack
+    // guest: the host walked an XP orb into us and is handing over the levels. Orbs are
+    // host-authoritative like every other entity, so this is the only way a guest gets XP.
+    Net.on('xp', (m) => { if (this.player && m.v > 0) this.player.addXP(m.v); });
     Net.on('ents', (m) => this.onRemoteEnts(m));        // guest: host's authoritative mob/projectile snapshot
     // host: how far this guest can see, so we only stream the entities it could render
     Net.on('view', (m) => {
@@ -16118,6 +16481,7 @@ const Game = {
       if (r && typeof m.r === 'number') r.viewR = clamp(m.r, MP_ENT_MIN_RADIUS, MP_ENT_MAX_RADIUS);
     });
     Net.on('spawnReq', (m) => this.onRemoteSpawnReq(m));// host: a guest asked us to spawn a mob/tnt/arrow
+    Net.on('wcmd', (m) => this.onRemoteWorldCommand(m)); // host: an owner's /time or /weather
     Net.on('mhit', (m) => this.onRemoteMobHit(m));      // host: a guest hit one of our mobs
     Net.on('phit', (m) => this.onRemotePhit(m));        // anyone: another player hit me
     Net.on('hello', (m) => {
@@ -16139,6 +16503,30 @@ const Game = {
     Net.on('mod', (m) => Mods.onNet(m));
     // the host runs a mod we don't have (or have switched off) — bow out and say which
     Net.on('modkick', (m) => this.onModKick(m));
+    // dedicated server (9e): this name is now ours, here is the proof to send next time
+    Net.on('authok', (m) => { if (m.token) this.mpSaveToken(m.name || this.mpMyName(), m.token); });
+    // dedicated server: what we're allowed to do with slash commands. Sent on join and again
+    // whenever the owner changes it in the admin panel, so a promotion takes effect at once.
+    Net.on('perm', (m) => {
+      const lvl = m.level === 'owner' || m.level === 'op' ? m.level : 'player';
+      if (lvl !== this.mpPerm) {
+        this.mpPerm = lvl;
+        if (this.state === 'play') UI.msg('You are now: ' + lvl, '#ffff55');
+      }
+    });
+    // the server refused a command-flagged message; say so rather than leaving it a mystery
+    Net.on('permdenied', (m) => {
+      UI.msg('The server refused that (' + (m.what || 'not allowed') + ')', '#ff5555');
+    });
+    // ...or it refused us: whitelist, ban, or the name belongs to somebody else
+    Net.on('authfail', (m) => {
+      const why = String(m.reason || 'The server would not let you in.').slice(0, 120);
+      Net.disconnect();
+      this.clearRemotes();
+      this.mpRole = null; this.isGuest = false;
+      if (this.state === 'play') this.mpKickToMenu(why);
+      else { this.state = 'mp'; UI.mpScreen = 'list'; UI.mpNotice = why; Net.errorMsg = ''; }
+    });
     // guest lost track of a puppet → wipe our idea of what it knows so both streamed
     // channels rebuild from a keyframe on their next tick
     Net.on('entRs', (m) => {
@@ -16156,7 +16544,8 @@ const Game = {
     Net.on('sign', (m) => this.onRemoteSign(m));      // anyone: sign text was edited
     Net.on('frame', (m) => this.onRemoteFrame(m));    // anyone: item frame filled/turned
     Net.on('chat', (m) => { const r = this.getRemote(m.from); UI.msg('<' + ((r && r.name) || 'Player') + '> ' + (m.text || '').slice(0, 200)); });
-    Net.on('skin', (m) => { if (m.data) this.loadRemoteSkin(m.from, m.data); }); // another player's custom skin
+    // another player's custom skin; a null payload means they went back to the default
+    Net.on('skin', (m) => { if (m.data) this.loadRemoteSkin(m.from, m.data); else this.clearRemoteSkin(m.from); });
     Net.on('env', (m) => this.onRemoteEnv(m));   // guest: host's authoritative time + weather
     // guest: the host moved its render-distance slider — that's the room's ceiling
     Net.on('rdcap', (m) => { if (m.from === 0 && this.mpRole !== 'host') this.setRDCap(m.n); });
@@ -16317,6 +16706,99 @@ const Game = {
     return (this.mpName || 'Player').slice(0, 16);
   },
   mpSaveName() { try { localStorage.setItem('mcpe_name', this.mpName || ''); } catch (e) {} },
+  // ---- server name claims (phase 9e) ----
+  // A dedicated server keys every character by display name, so without something proving
+  // who you are, typing a friend's name hands you their inventory. The server mints a random
+  // token the first time a name connects and we keep it here; every later join sends it back.
+  // Nobody types anything — which is the point, because everyone playing this is on a phone.
+  // Scoped per server AND per name: one device can legitimately be two people on two servers.
+  mpTokenKey(name) { return (Net.relayUrl || '') + '|' + String(name || '').trim().toLowerCase(); },
+  mpTokens() {
+    if (!this._tokens) {
+      try { this._tokens = JSON.parse(localStorage.getItem('mcpe_tokens') || '{}') || {}; }
+      catch (e) { this._tokens = {}; }
+    }
+    return this._tokens;
+  },
+  mpMyToken() { return this.mpTokens()[this.mpTokenKey(this.mpMyName())] || null; },
+  mpSaveToken(name, token) {
+    const all = this.mpTokens();
+    all[this.mpTokenKey(name)] = token;
+    try { localStorage.setItem('mcpe_tokens', JSON.stringify(all)); } catch (e) {}
+  },
+  // ---- the saved server list (the Play Multiplayer screen) ----
+  // Rows are {id, name, addr} on disk; the live ping result is hung on the same object
+  // as `.ping` and deliberately NOT persisted — it is worth nothing after a reload.
+  mpServers() {
+    if (!this._servers) {
+      let raw = null;
+      try { raw = JSON.parse(localStorage.getItem('mcpe_servers') || '[]'); } catch (e) {}
+      this._servers = (Array.isArray(raw) ? raw : [])
+        .filter((s) => s && s.addr)
+        .map((s) => ({ id: String(s.id || Game.mpNewServerId()), name: String(s.name || '').slice(0, 32), addr: String(s.addr).slice(0, 120) }));
+    }
+    return this._servers;
+  },
+  mpSaveServers() {
+    const plain = this.mpServers().map((s) => ({ id: s.id, name: s.name, addr: s.addr }));
+    try { localStorage.setItem('mcpe_servers', JSON.stringify(plain)); } catch (e) {}
+  },
+  mpServer(id) { return this.mpServers().find((s) => String(s.id) === String(id)) || null; },
+  // string ids, so a row survives the round trip through a button id ('msel_<id>')
+  mpNewServerId() { return 's' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36); },
+  mpAddServer(name, addr) {
+    const s = { id: this.mpNewServerId(), name: String(name || '').slice(0, 32), addr: String(addr || '').trim().slice(0, 120) };
+    this.mpServers().push(s);
+    this.mpSaveServers();
+    this.mpPingServer(s);
+    return s;
+  },
+  mpDeleteServer(id) {
+    const list = this.mpServers();
+    const i = list.findIndex((s) => String(s.id) === String(id));
+    if (i >= 0) list.splice(i, 1);
+    this.mpSaveServers();
+  },
+  // ---- server status ping ----
+  // The dedicated server answers /health with {ok, motd, players:{online,max}} and no
+  // password (see dedicated/server.js) — enough for vanilla's motd + player count + bars.
+  mpPingServers() { for (const s of this.mpServers()) this.mpPingServer(s); },
+  mpPingServer(s) {
+    if (!s || !s.addr) return;
+    // an https page cannot even ask an http:// server — say that instead of "offline",
+    // because it is a fixable address problem, not a dead server
+    if (Net.isMixedBlocked(s.addr)) { s.ping = { state: 'blocked' }; return; }
+    const url = Net.healthUrl(s.addr);
+    if (!url) { s.ping = { state: 'down' }; return; }
+    const seq = (s._pingSeq = (s._pingSeq || 0) + 1);
+    s.ping = { state: 'pinging' };
+    const t0 = performance.now();
+    // a server that accepts the connection and then never answers would otherwise leave
+    // the row spinning forever
+    const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    const timer = setTimeout(() => { if (ctl) ctl.abort(); }, 6000);
+    const opts = { cache: 'no-store' };
+    if (ctl) opts.signal = ctl.signal;
+    fetch(url, opts)
+      .then((r) => r.json())
+      .then((j) => {
+        clearTimeout(timer);
+        if (s._pingSeq !== seq) return;   // a newer Refresh already owns this row
+        const pl = j && j.players ? j.players : {};
+        s.ping = {
+          state: 'up',
+          ms: Math.round(performance.now() - t0),
+          motd: String(j && j.motd || '').slice(0, 60),
+          online: pl.online != null ? pl.online : '?',
+          max: pl.max != null ? pl.max : '?',
+        };
+      })
+      .catch(() => {
+        clearTimeout(timer);
+        if (s._pingSeq !== seq) return;
+        s.ping = { state: 'down' };
+      });
+  },
   // ---- guest characters (host-side persistence, keyed by display name) ----
   // The host's world save owns everyone's inventory: guests stream their character
   // to the host every few seconds, the host stores it under their name and hands it
@@ -16361,7 +16843,14 @@ const Game = {
     this.guestData[this.mpDataKey(r && r.name)] = m.d;
   },
   // `to` omitted = tell the whole room; `to` set = only the peer that just joined
-  mpSendHello(to) { Net.send('hello', { name: this.mpMyName(), mp: MP_PROTO, mods: Mods.activeIds() }, to); },
+  mpSendHello(to) {
+    const m = { name: this.mpMyName(), mp: MP_PROTO, mods: Mods.activeIds() };
+    // Only a dedicated server looks at this; a browser host ignores it, so it costs a
+    // hosted room one short string per join and needs no protocol negotiation.
+    const tok = this.mpMyToken();
+    if (tok) m.token = tok;
+    Net.send('hello', m, to);
+  },
   // ---- mods in a room (see js/mods.js) ----
   // host: does this guest run everything we run? Deliberately one-directional and only at
   // join time — a guest running EXTRA mods of their own is their own business, and
@@ -16398,6 +16887,7 @@ const Game = {
       ? 'Switch it on below, then join again.'
       : 'Put the missing file in mods/, hit Reload, switch it on.';
     UI.modsBack = 'mp';
+    UI.mpScreen = 'list';
     this.state = 'mods';
     Mods.scan(true);
   },
@@ -16433,6 +16923,12 @@ const Game = {
     img.src = dataURL;
   },
   // another player's skin arrived → paint it into that player's own atlas slot
+  clearRemoteSkin(pid) {
+    const r = this.remotes.get(pid);
+    if (!r || !r.hasSkin || r.slot == null) return;
+    r.hasSkin = false;
+    this.resetSkinSlot('skin_remote' + r.slot);
+  },
   loadRemoteSkin(pid, dataURL) {
     const r = this.getRemote(pid);
     if (!r || r.slot == null) return;
@@ -16494,6 +16990,31 @@ const Game = {
   },
   // desktop / fallback path: open the picker from the button handler's click gesture
   pickSkin() { this.ensureSkinInput().click(); },
+  // Join a saved server. A dedicated server is pid 0 in its own room and ignores the
+  // room code entirely (see dedicated/net-server.js), so there is nothing to type — this
+  // is what makes the list feel like vanilla's.
+  mpJoinServer(s) {
+    if (!s) return;
+    if (Net.isMixedBlocked(s.addr)) {
+      Net.errorMsg = 'This page is https, so the server needs a wss:// address';
+      return;
+    }
+    const url = Net.normalizeAddr(s.addr);
+    if (!url) { Net.errorMsg = 'Bad server address'; return; }
+    this.initNet();
+    this.mpTarget = s.name || s.addr;
+    // remember:false — otherwise this address becomes the default relay and Direct
+    // Connect would dial this server instead of the public relay ever after
+    Net.join(url, '000000', { remember: false });
+  },
+  // back to the built-in Steve skin
+  clearSkin() {
+    this.hasSkin = false;
+    this.mySkinData = null;
+    try { localStorage.removeItem('mcpe_skin'); } catch (e) {}
+    this.resetSkinSlot('skin_self');   // repaint the atlas slot with the default Steve art
+    if (Net.connected) Net.send('skin', { data: null });
+  },
   mpSendSkin(to) { if (this.mySkinData) Net.send('skin', { data: this.mySkinData }, to); },
   // ---- world time + weather sync (host-authoritative) ----
   // The host owns the clock and the weather; the guest keeps ticking its own time
@@ -16729,10 +17250,22 @@ const Game = {
   // Player actions (place/break/interact) are wrapped in mpBeginEdit/mpEndEdit; every
   // world.setBlock during that window is captured and broadcast to the other player.
   mpBeginEdit() { if ((this.mpRole || this.isGuest) && Net.connected) this.mpCapturing = []; },
-  mpEndEdit() {
+  /**
+   * @param {boolean} [fromCommand] this batch came from a slash command, not a swing. The
+   *   dedicated server refuses these from anyone who is not the owner (see allowFromLevel in
+   *   dedicated/server.js), which is what stops /fill being a griefing tool.
+   */
+  mpEndEdit(fromCommand) {
     const cap = this.mpCapturing;
     this.mpCapturing = null;
-    if (cap && cap.length && Net.connected) Net.send('blocks', { dim: this.world.dim, edits: cap });
+    if (!cap || !cap.length || !Net.connected) return;
+    // Chunked for the same reason mpFlushAmbient is: an ordinary swing is one or two blocks, but
+    // /fill allows up to 32 768, which as a single message is ~800 KB — one stall on every
+    // client and an uncomfortable fraction of the relay's frame cap.
+    const extra = fromCommand ? { cmd: 1 } : null;
+    for (let i = 0; i < cap.length; i += 2000) {
+      Net.send('blocks', Object.assign({ dim: this.world.dim, edits: cap.slice(i, i + 2000) }, extra));
+    }
   },
   // ---- host: world-driven block changes ----
   // mpBeginEdit/mpEndEdit only ever wrapped a PLAYER action, so everything the world does on
@@ -17502,6 +18035,24 @@ const Game = {
     return e;
   },
   // Host: guest asked us to spawn something (host-authority for guest actions).
+  /**
+   * Host/server: apply a world command an owner sent.
+   *
+   * Only time and weather live here. Everything else a command does either already has a
+   * channel that works (a /fill's blocks, a /spawn's mob) or is purely the caller's own
+   * business (their inventory, their position). Permission is checked BEFORE this — the
+   * dedicated server drops the message at the door (allowFromLevel), so by the time it lands
+   * here it is already authorised.
+   */
+  onRemoteWorldCommand(m) {
+    if (this.mpRole !== 'host' || !this.world) return;
+    if (m.c === 'time' && typeof m.v === 'number') {
+      if (m.add) this.time += m.v;
+      else this.time = Math.floor(this.time / 24000) * 24000 + ((m.v % 24000) + 24000) % 24000;
+    } else if (m.c === 'weather' && typeof m.s === 'string') {
+      Weather.set(m.s, typeof m.d === 'number' ? m.d : undefined);
+    }
+  },
   onRemoteSpawnReq(m) {
     if (this.mpRole !== 'host' || !this.world) return;
     const w = this.world;
@@ -17525,15 +18076,58 @@ const Game = {
   // simulation used to measure from the local player alone, so everything around a guest who
   // had walked away from the host simply stopped: their dropped items were never collected
   // (pickup-on-behalf-of-a-guest runs inside ItemEntity.update) and the mobs beside them froze.
-  mpNearestPlayerDist(x, z) {
+  // ---- who the simulation follows (dedicated-server fix, 2026-08-26) ----
+  // A browser host IS a player: `Game.player` stands in the middle of the action, so the
+  // engine could always say "near the player" and mean it. A DEDICATED server's Game.player
+  // is an invisible anchor bolted to world spawn — so every one of those places silently
+  // meant "near spawn", and a player who walked away found a dead world: no mobs, no crops
+  // growing, no spawners, no XP. This is the one list all of them ask instead.
+  //
+  // Entries are plain {x, y, z, pid, player, remote}. `player` is set only for the local
+  // one (so code that needs a real Player object — addXP, inventory — can tell), `pid` only
+  // for a remote (so the host can send them something).
+  playerAnchors() {
+    const out = [];
     const p = this.player;
-    let best = p ? Math.hypot(p.x - x, p.z - z) : Infinity;
+    // serverAnchorHidden is set by dedicated/headless.js. On a browser host it is false and
+    // this list starts with the local player, so singleplayer and hosting are unchanged.
+    if (p && !this.serverAnchorHidden) {
+      out.push({ x: p.x, y: p.y, z: p.z, pid: null, player: p, dead: !!p.deadFlag });
+    }
     if (this.mpRole === 'host' && Net.connected) {
       for (const r of this.remotes.values()) {
         if (!r.seen) continue;
-        const d = Math.hypot(r.dispX - x, r.dispZ - z);
-        if (d < best) best = d;
+        out.push({ x: r.dispX, y: r.dispY, z: r.dispZ, pid: r.pid, remote: r, dead: !!r.dead });
       }
+    }
+    return out;
+  },
+  // The nearest living player to a point, or null when nobody is in range at all. Used by
+  // anything that homes in on a player (XP orbs) or acts on the closest one.
+  nearestAnchor(x, y, z, maxD) {
+    let best = null, bestD = maxD == null ? Infinity : maxD;
+    for (const a of this.playerAnchors()) {
+      if (a.dead) continue;
+      const d = Math.hypot(a.x - x, (a.y + 0.9) - y, a.z - z);
+      if (d < bestD) { bestD = d; best = a; }
+    }
+    return best ? { a: best, d: bestD } : null;
+  },
+  // Hand XP to whoever collected it. The local player adds it directly; a remote gets a
+  // message, the same way `give` hands over a picked-up item stack.
+  awardXP(anchor, value) {
+    if (!anchor) return;
+    if (anchor.player) { anchor.player.addXP(value); return; }
+    if (anchor.pid != null && Net.connected) Net.send('xp', { v: value }, anchor.pid);
+  },
+  mpNearestPlayerDist(x, z) {
+    // playerAnchors() rather than a second copy of the same loop — it is what leaves a
+    // dedicated server's invisible anchor out, so the server stops keeping a 130-block
+    // simulation bubble alive around world spawn when nobody is standing there.
+    let best = Infinity;
+    for (const a of this.playerAnchors()) {
+      const d = Math.hypot(a.x - x, a.z - z);
+      if (d < best) best = d;
     }
     return best;
   },
@@ -17580,9 +18174,21 @@ const Game = {
     Net.send('view', { r }, 0);
   },
   // Guest: ask the host to spawn a host-authoritative entity on our behalf.
-  mpSpawnRequest(kind, data) {
+  // `fromCommand` marks a /spawn rather than a spawn egg or a fired arrow, so the dedicated
+  // server can refuse it from a non-owner without touching ordinary play.
+  mpSpawnRequest(kind, data, fromCommand) {
     if (!Net.connected) return;
-    Net.send('spawnReq', Object.assign({ k: kind }, data), 0);
+    const m = Object.assign({ k: kind }, data);
+    if (fromCommand) m.cmd = 1;
+    Net.send('spawnReq', m, 0);
+  },
+  // A world command the guest cannot perform itself, because the server owns the answer and
+  // would overwrite it a moment later anyway (the time of day and the weather both arrive on
+  // the `env` stream). Owner-only, enforced server-side.
+  mpSendWorldCommand(data) {
+    if (!Net.connected) return false;
+    Net.send('wcmd', data, 0);
+    return true;
   },
   // Guest: tell the host we melee-hit one of their mobs.
   mpSendMobHit(nid, dmg, srcX, srcZ) {
@@ -17678,7 +18284,21 @@ const Game = {
     this.mpPosTimer += dt;
     if (this.mpPosTimer < 0.066) return; // ~15 Hz
     this.mpPosTimer = 0;
-    if (!Net.peers.length) return;   // alone in the room: nobody to tell
+    // A guest's position always has exactly one guaranteed listener: pid 0 — the browser host
+    // rendering them, or (on a dedicated server) the process running every bit of simulation
+    // keyed on player position: mob spawning, the despawn radius, chunk streaming,
+    // pickup-on-behalf, pressure plates, mob targeting. net-server.js deliberately hides pid 0
+    // from Net.peers so player-facing counts stay right (its own comment explains why), which
+    // means a LONE guest on a dedicated server saw Net.peers.length === 0 here and this
+    // function returned before sending anything, ever. getRemote(pid).seen then never became
+    // true, playerAnchors() never included them, and NaturalSpawner's very first line
+    // (`if (!anchors.length) return;`) meant literally nothing spawned or despawned anywhere,
+    // for anyone, the whole time they were the only one connected.
+    // A browser-hosted room does not have this problem — relay.js puts pid 0 in a guest's
+    // peers itself, so a lone guest there already had peers.length===1. This only ever
+    // changes behaviour for a guest talking to a dedicated server.
+    // A HOST with an empty room really has nobody to tell, so that half keeps the old gate.
+    if (!this.isGuest && !Net.peers.length) return;   // host, alone: nobody to tell
     const p = this.player;
     const held = p.heldItem();
     // block the other player is currently mining → [x,y,z,stage 0-9] so they see cracks
@@ -17790,19 +18410,38 @@ const Game = {
       if (code === 'Escape') this.onButton('mods_back');
       return;
     }
+    if (this.state === 'account' && down) {
+      if (code === 'Backspace') this.mpName = (this.mpName || '').slice(0, -1);
+      else if (code === 'Enter' || code === 'Escape') { this.onButton('acc_done'); return; }
+      else if (/^[ -~]$/.test(e.key) && (this.mpName || '').length < 16) this.mpName = (this.mpName || '') + e.key;
+      this.mpSaveName();
+      e.preventDefault();
+      return;
+    }
     if (this.state === 'mp' && down) {
-      if (UI.mpFocus === 'name') {
-        if (code === 'Backspace') this.mpName = (this.mpName || '').slice(0, -1);
-        else if (code === 'Enter' || code === 'Tab') UI.mpFocus = 'code';
-        else if (code === 'Escape') this.onButton('mp_back');
-        else if (/^[\x20-\x7e]$/.test(e.key) && (this.mpName || '').length < 16) this.mpName = (this.mpName || '') + e.key;
-        this.mpSaveName();
-      } else {
+      if (UI.mpScreen === 'add') {
+        const field = UI.srvFocus === 'addr' ? 'srvAddr' : 'srvName';
+        const max = UI.srvFocus === 'addr' ? 120 : 32;
+        if (code === 'Tab') UI.srvFocus = UI.srvFocus === 'addr' ? 'name' : 'addr';
+        else if (code === 'Backspace') UI[field] = UI[field].slice(0, -1);
+        else if (code === 'Enter') this.onButton('srv_done');
+        else if (code === 'Escape') this.onButton('srv_cancel');
+        else if (/^[ -~]$/.test(e.key) && UI[field].length < max) UI[field] += e.key;
+      } else if (UI.mpScreen === 'direct') {
         if (code === 'Backspace') UI.mpCode = (UI.mpCode || '').slice(0, -1);
         else if (code === 'Enter') this.onButton('mp_join');
-        else if (code === 'Escape') this.onButton('mp_back');
-        else if (code === 'Tab') UI.mpFocus = 'name';
+        else if (code === 'Escape') this.onButton('mp_direct_back');
         else if (/^[0-9]$/.test(e.key) && (UI.mpCode || '').length < 6) UI.mpCode = (UI.mpCode || '') + e.key;
+      } else {
+        // the server list: arrows walk the rows, Enter joins the highlighted one
+        const list = this.mpServers();
+        if (code === 'Escape') this.onButton('mp_back');
+        else if (code === 'Enter') this.onButton('mp_join_server');
+        else if ((code === 'ArrowDown' || code === 'ArrowUp') && list.length) {
+          const i = list.findIndex((sv) => String(sv.id) === String(UI.mpSel));
+          const n = code === 'ArrowDown' ? (i + 1) % list.length : (i <= 0 ? list.length - 1 : i - 1);
+          UI.mpSel = list[n].id;
+        }
       }
       e.preventDefault();
       return;
@@ -17885,23 +18524,103 @@ const Game = {
       else UI.selectedWorld = wid;
       return;
     }
+    // a server row: first click selects, second joins (same as the world list)
+    if (id.startsWith && id.startsWith('msel_')) {
+      const sid = id.slice(5);
+      if (String(UI.mpSel) === sid) this.onButton('mp_join_server');
+      else { UI.mpSel = sid; Net.errorMsg = ''; }
+      return;
+    }
     if (id.startsWith && id.startsWith('mod_toggle_')) {
       Mods.toggle(id.slice(11));
       return;
     }
     switch (id) {
       case 'single': this.state = 'worlds'; UI.selectedWorld = null; break;
-      case 'multiplayer_menu': this.state = 'mp'; UI.mpCode = ''; UI.mpFocus = 'name'; UI.mpNotice = ''; this.mpMyName(); this.mpRole = null; this.isGuest = false; Net.disconnect(); this.clearRemotes(); this.initNet(); break;
+      // ---- multiplayer: the server list ----
+      case 'multiplayer_menu':
+        this.state = 'mp'; UI.mpScreen = 'list'; UI.mpCode = ''; UI.mpNotice = '';
+        this.mpMyName(); this.mpRole = null; this.isGuest = false;
+        Net.disconnect(); this.clearRemotes(); this.initNet();
+        this.mpPingServers();
+        break;
+      case 'mp_refresh': Net.errorMsg = ''; UI.mpNotice = ''; this.mpPingServers(); break;
+      case 'mp_join_server': {
+        const s = this.mpServer(UI.mpSel);
+        if (!s) break;
+        UI.mpNotice = ''; Net.errorMsg = '';
+        this.mpJoinServer(s);
+        break;
+      }
+      case 'mp_add':
+        UI.mpScreen = 'add'; UI.mpEditId = null; UI.srvName = ''; UI.srvAddr = '';
+        UI.srvFocus = 'name'; UI.srvError = ''; Net.errorMsg = '';
+        break;
+      case 'mp_edit': {
+        const s = this.mpServer(UI.mpSel);
+        if (!s) break;
+        UI.mpScreen = 'add'; UI.mpEditId = s.id; UI.srvName = s.name; UI.srvAddr = s.addr;
+        UI.srvFocus = 'name'; UI.srvError = ''; Net.errorMsg = '';
+        break;
+      }
+      case 'mp_delete':
+        if (UI.mpSel == null) break;
+        this.mpDeleteServer(UI.mpSel);
+        UI.mpSel = null;
+        break;
+      // ---- multiplayer: Add / Edit Server ----
+      case 'srv_focus_name': UI.srvFocus = 'name'; if (Mobile.enabled) Mobile.openKeyboard('srvname'); break;
+      case 'srv_focus_addr': UI.srvFocus = 'addr'; if (Mobile.enabled) Mobile.openKeyboard('srvaddr'); break;
+      case 'srv_done': {
+        const addr = (UI.srvAddr || '').trim();
+        if (!addr) { UI.srvError = 'Enter a server address'; break; }
+        const name = (UI.srvName || '').trim() || addr;
+        if (UI.mpEditId != null) {
+          const s = this.mpServer(UI.mpEditId);
+          if (s) { s.name = name.slice(0, 32); s.addr = addr.slice(0, 120); this.mpSaveServers(); this.mpPingServer(s); }
+          UI.mpSel = UI.mpEditId;
+        } else {
+          UI.mpSel = this.mpAddServer(name, addr).id;
+        }
+        UI.mpScreen = 'list'; UI.mpEditId = null; UI.srvError = '';
+        if (Mobile.enabled) Mobile.closeKeyboard();
+        break;
+      }
+      case 'srv_cancel':
+        UI.mpScreen = 'list'; UI.mpEditId = null; UI.srvError = '';
+        if (Mobile.enabled) Mobile.closeKeyboard();
+        break;
+      // ---- multiplayer: Direct Connect (a friend's 6-digit room code) ----
+      case 'mp_direct':
+        UI.mpScreen = 'direct'; UI.mpCode = ''; UI.mpNotice = ''; Net.errorMsg = '';
+        break;
+      case 'mp_direct_back':
+        UI.mpScreen = 'list'; UI.mpCode = ''; Net.errorMsg = '';
+        if (Mobile.enabled) Mobile.closeKeyboard();
+        break;
       case 'mp_join':
         UI.mpNotice = '';
-        if ((UI.mpCode || '').length === 6) { this.initNet(); Net.join(Net.defaultRelayUrl(), UI.mpCode); }
-        else Net.errorMsg = 'Enter a 6-digit code';
+        if ((UI.mpCode || '').length === 6) {
+          this.initNet();
+          this.mpTarget = 'Room ' + UI.mpCode;
+          // the room-code flow always goes through the relay, never a saved server
+          Net.join(Net.defaultRelayUrl(), UI.mpCode);
+        } else Net.errorMsg = 'Enter a 6-digit code';
         break;
-      case 'mp_focus_code': UI.mpFocus = 'code'; if (Mobile.enabled) Mobile.openKeyboard('mpcode'); break;
-      case 'mp_focus_name': UI.mpFocus = 'name'; if (Mobile.enabled) Mobile.openKeyboard('mpname'); break;
-      case 'mp_upload_skin': this.pickSkin(); break;
+      case 'mp_focus_code': if (Mobile.enabled) Mobile.openKeyboard('mpcode'); break;
+      // ---- account (name + skin) ----
+      case 'account_menu': this.state = 'account'; UI.accountFocus = 'name'; this.mpMyName(); break;
+      case 'acc_focus_name': UI.accountFocus = 'name'; if (Mobile.enabled) Mobile.openKeyboard('mpname'); break;
+      case 'acc_upload_skin': this.pickSkin(); break;
+      case 'acc_clear_skin': this.clearSkin(); break;
+      case 'acc_done':
+        this.mpSaveName();
+        if (Mobile.enabled) Mobile.closeKeyboard();
+        this.hideSkinInput();
+        this.state = 'title';
+        break;
       case 'mp_cancel': Net.disconnect(); this.state = 'mp'; UI.mpCode = ''; break;
-      case 'mp_back': Net.disconnect(); this.state = 'title'; UI.mpNotice = ''; break;
+      case 'mp_back': Net.disconnect(); this.state = 'title'; UI.mpNotice = ''; Net.errorMsg = ''; break;
       // ---- mods (see js/mods.js) ----
       case 'mods_menu': this.state = 'mods'; UI.modsBack = 'title'; UI.modsNotice = ''; UI.modsNotice2 = ''; Mods.scan(); break;
       // bypasses the discovery cache — this is the button you press after uploading a mod
@@ -18001,8 +18720,8 @@ const Game = {
     this.mpRole = null; this.isGuest = false;
     this.toTitle();
     this.state = 'mp';
+    UI.mpScreen = 'list';
     UI.mpCode = '';
-    UI.mpFocus = 'name';
     UI.mpNotice = reason || '';
     this.mpMyName();
   },
@@ -18014,6 +18733,8 @@ const Game = {
       this.clearRemotes();
       this.mpRole = null; this.isGuest = false;
     }
+    // a dedicated server may have lowered this; singleplayer is never restricted
+    this.mpPerm = 'owner';
     UI.screen = 'none';
     Chat.open = false;
     Chat.input = '';
@@ -18685,7 +19406,7 @@ const Game = {
     // toTitle(), which nulls this.player/this.world, and the rest of a play tick (streamChunks,
     // the step-sound block) dereferences them without asking. Doing it mid-tick threw.
     if (this.mpCheckSilence()) return;
-    if (this.state === 'title' || this.state === 'create' || this.state === 'title_options' || this.state === 'worlds' || this.state === 'mp' || this.state === 'mods') {
+    if (this.state === 'title' || this.state === 'create' || this.state === 'title_options' || this.state === 'worlds' || this.state === 'mp' || this.state === 'mods' || this.state === 'account') {
       UI.draw(this, dt);
       return;
     }
